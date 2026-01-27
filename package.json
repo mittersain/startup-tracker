@@ -1,0 +1,25 @@
+{
+  "name": "startup-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "type-check": "turbo run type-check",
+    "db:migrate": "npm run db:migrate --workspace=@startup-tracker/api",
+    "db:generate": "npm run db:generate --workspace=@startup-tracker/api",
+    "db:studio": "npm run db:studio --workspace=@startup-tracker/api"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
