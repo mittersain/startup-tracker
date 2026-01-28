@@ -1334,14 +1334,22 @@ app.get('/emails/startup/:startupId', authenticate, async (req: AuthRequest, res
 
     const emails = snapshot.docs.map(doc => {
       const data = doc.data();
+      const dateValue = data.date?.toDate?.()?.toISOString() || data.date;
       return {
         id: doc.id,
         subject: data.subject,
-        from: data.from,
+        // Frontend expected fields
+        fromAddress: data.from,
         fromName: data.fromName,
+        toAddresses: data.to ? [{ email: data.to }] : [],
+        bodyPreview: data.body,
+        bodyHtml: data.bodyHtml || null,
+        receivedAt: dateValue,
+        // Also include original fields for compatibility
+        from: data.from,
         to: data.to,
         body: data.body,
-        date: data.date?.toDate?.()?.toISOString() || data.date,
+        date: dateValue,
         direction: data.direction || 'inbound',
         isRead: data.isRead !== false,
         labels: data.labels || [],
@@ -1351,7 +1359,7 @@ app.get('/emails/startup/:startupId', authenticate, async (req: AuthRequest, res
     });
 
     // Sort by date descending
-    emails.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+    emails.sort((a, b) => new Date(b.receivedAt || 0).getTime() - new Date(a.receivedAt || 0).getTime());
 
     return res.json({ data: emails, total: emails.length });
   } catch (error) {
