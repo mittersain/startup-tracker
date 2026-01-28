@@ -939,7 +939,24 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req, res) => {
         if (!existingByEmail.empty) {
             // Startup already exists - link proposal to existing startup and mark as approved
             const existingStartup = existingByEmail.docs[0];
-            await proposalRef.update({ status: 'approved', linkedStartupId: existingStartup.id });
+            // Create email record for the new email thread
+            const emailRef = db.collection('emails').doc();
+            await emailRef.set({
+                startupId: existingStartup.id,
+                organizationId: req.user.organizationId,
+                subject: proposalData.emailSubject,
+                from: proposalData.emailFrom,
+                fromName: proposalData.emailFromName || proposalData.founderName,
+                to: proposalData.emailTo || 'inbox',
+                body: proposalData.emailPreview,
+                date: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
+                direction: 'inbound',
+                isRead: true,
+                labels: ['proposal'],
+                messageId: proposalData.messageId || `proposal-${req.params.id}`,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            await proposalRef.update({ status: 'approved', linkedStartupId: existingStartup.id, emailId: emailRef.id });
             return res.json({
                 success: true,
                 startupId: existingStartup.id,
@@ -960,7 +977,24 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req, res) => {
                     normalizedName.includes(existingName));
             });
             if (duplicate) {
-                await proposalRef.update({ status: 'approved', linkedStartupId: duplicate.id });
+                // Create email record for the new email thread
+                const emailRef = db.collection('emails').doc();
+                await emailRef.set({
+                    startupId: duplicate.id,
+                    organizationId: req.user.organizationId,
+                    subject: proposalData.emailSubject,
+                    from: proposalData.emailFrom,
+                    fromName: proposalData.emailFromName || proposalData.founderName,
+                    to: proposalData.emailTo || 'inbox',
+                    body: proposalData.emailPreview,
+                    date: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
+                    direction: 'inbound',
+                    isRead: true,
+                    labels: ['proposal'],
+                    messageId: proposalData.messageId || `proposal-${req.params.id}`,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+                await proposalRef.update({ status: 'approved', linkedStartupId: duplicate.id, emailId: emailRef.id });
                 return res.json({
                     success: true,
                     startupId: duplicate.id,
@@ -1006,13 +1040,77 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req, res) => {
             console.log(`[Approve] AI analysis complete. Score: ${aiAnalysis.currentScore}`);
         }
         await startupRef.set(startupData);
+        // Create email record from the proposal
+        const emailRef = db.collection('emails').doc();
+        await emailRef.set({
+            startupId: startupRef.id,
+            organizationId: req.user.organizationId,
+            subject: proposalData.emailSubject,
+            from: proposalData.emailFrom,
+            fromName: proposalData.emailFromName || proposalData.founderName,
+            to: proposalData.emailTo || 'inbox',
+            body: proposalData.emailPreview,
+            date: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
+            direction: 'inbound',
+            isRead: true,
+            labels: ['proposal'],
+            messageId: proposalData.messageId || `proposal-${req.params.id}`,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
         // Update proposal status
-        await proposalRef.update({ status: 'approved', linkedStartupId: startupRef.id });
+        await proposalRef.update({ status: 'approved', linkedStartupId: startupRef.id, emailId: emailRef.id });
         return res.json({ success: true, startupId: startupRef.id, score: aiAnalysis?.currentScore });
     }
     catch (error) {
         console.error('Approve proposal error:', error);
         return res.status(500).json({ error: 'Failed to approve proposal' });
+    }
+});
+// Backfill emails for existing startups from approved proposals
+app.post('/inbox/backfill-emails', authenticate, async (req, res) => {
+    try {
+        // Find approved proposals that have linkedStartupId but no emailId
+        const proposalSnapshot = await db.collection('proposalQueue')
+            .where('organizationId', '==', req.user.organizationId)
+            .where('status', '==', 'approved')
+            .get();
+        let created = 0;
+        for (const doc of proposalSnapshot.docs) {
+            const data = doc.data();
+            if (data.linkedStartupId && !data.emailId) {
+                // Check if email already exists for this startup with same subject
+                const existingEmail = await db.collection('emails')
+                    .where('startupId', '==', data.linkedStartupId)
+                    .where('subject', '==', data.emailSubject)
+                    .limit(1)
+                    .get();
+                if (existingEmail.empty) {
+                    const emailRef = db.collection('emails').doc();
+                    await emailRef.set({
+                        startupId: data.linkedStartupId,
+                        organizationId: req.user.organizationId,
+                        subject: data.emailSubject,
+                        from: data.emailFrom,
+                        fromName: data.emailFromName || data.founderName,
+                        to: 'inbox',
+                        body: data.emailPreview,
+                        date: data.emailDate || data.createdAt,
+                        direction: 'inbound',
+                        isRead: true,
+                        labels: ['proposal'],
+                        messageId: data.messageId || `proposal-${doc.id}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    });
+                    await doc.ref.update({ emailId: emailRef.id });
+                    created++;
+                }
+            }
+        }
+        return res.json({ success: true, created });
+    }
+    catch (error) {
+        console.error('Backfill emails error:', error);
+        return res.status(500).json({ error: 'Failed to backfill emails' });
     }
 });
 app.post('/inbox/queue/:id/reject', authenticate, async (req, res) => {
@@ -1061,35 +1159,169 @@ app.get('/users', authenticate, async (req, res) => {
     }
 });
 // ==================== EMAILS ROUTES ====================
-app.get('/emails/startup/:startupId', authenticate, async (_req, res) => {
-    return res.json({ data: [], total: 0 });
+app.get('/emails/startup/:startupId', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        const snapshot = await db.collection('emails')
+            .where('startupId', '==', startupId)
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        const emails = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                subject: data.subject,
+                from: data.from,
+                fromName: data.fromName,
+                to: data.to,
+                body: data.body,
+                date: data.date?.toDate?.()?.toISOString() || data.date,
+                direction: data.direction || 'inbound',
+                isRead: data.isRead !== false,
+                labels: data.labels || [],
+                startupId: data.startupId,
+                createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+            };
+        });
+        // Sort by date descending
+        emails.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+        return res.json({ data: emails, total: emails.length });
+    }
+    catch (error) {
+        console.error('Get emails error:', error);
+        return res.json({ data: [], total: 0 });
+    }
 });
-app.get('/emails/unmatched', authenticate, async (_req, res) => {
-    return res.json({ data: [], total: 0 });
+app.get('/emails/unmatched', authenticate, async (req, res) => {
+    try {
+        const snapshot = await db.collection('emails')
+            .where('organizationId', '==', req.user.organizationId)
+            .where('startupId', '==', null)
+            .get();
+        const emails = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                subject: data.subject,
+                from: data.from,
+                fromName: data.fromName,
+                date: data.date?.toDate?.()?.toISOString() || data.date,
+                direction: data.direction || 'inbound',
+            };
+        });
+        return res.json({ data: emails, total: emails.length });
+    }
+    catch (error) {
+        console.error('Get unmatched emails error:', error);
+        return res.json({ data: [], total: 0 });
+    }
 });
-app.post('/emails/:emailId/match', authenticate, async (_req, res) => {
-    return res.json({ success: true });
+app.post('/emails/:emailId/match', authenticate, async (req, res) => {
+    try {
+        const { startupId } = req.body;
+        const emailRef = db.collection('emails').doc(req.params.emailId);
+        await emailRef.update({ startupId });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Match email error:', error);
+        return res.status(500).json({ error: 'Failed to match email' });
+    }
 });
-app.get('/emails/contacts/:startupId', authenticate, async (_req, res) => {
-    return res.json([]);
+app.get('/emails/contacts/:startupId', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        const snapshot = await db.collection('contacts')
+            .where('startupId', '==', startupId)
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        const contacts = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+        }));
+        return res.json(contacts);
+    }
+    catch (error) {
+        console.error('Get contacts error:', error);
+        return res.json([]);
+    }
 });
-app.post('/emails/contacts/:startupId', authenticate, async (_req, res) => {
-    return res.json({ id: 'placeholder', success: true });
+app.post('/emails/contacts/:startupId', authenticate, async (req, res) => {
+    try {
+        const { email, name, role } = req.body;
+        const contactRef = db.collection('contacts').doc();
+        await contactRef.set({
+            startupId: req.params.startupId,
+            organizationId: req.user.organizationId,
+            email,
+            name,
+            role,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return res.json({ id: contactRef.id, success: true });
+    }
+    catch (error) {
+        console.error('Create contact error:', error);
+        return res.status(500).json({ error: 'Failed to create contact' });
+    }
 });
-app.patch('/emails/contacts/:contactId', authenticate, async (_req, res) => {
-    return res.json({ success: true });
+app.patch('/emails/contacts/:contactId', authenticate, async (req, res) => {
+    try {
+        const contactRef = db.collection('contacts').doc(req.params.contactId);
+        await contactRef.update(req.body);
+        return res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Update contact error:', error);
+        return res.status(500).json({ error: 'Failed to update contact' });
+    }
 });
-app.delete('/emails/contacts/:contactId', authenticate, async (_req, res) => {
-    return res.status(204).send();
+app.delete('/emails/contacts/:contactId', authenticate, async (req, res) => {
+    try {
+        await db.collection('contacts').doc(req.params.contactId).delete();
+        return res.status(204).send();
+    }
+    catch (error) {
+        console.error('Delete contact error:', error);
+        return res.status(500).json({ error: 'Failed to delete contact' });
+    }
 });
-app.get('/emails/metrics/:startupId', authenticate, async (_req, res) => {
-    return res.json({
-        totalEmails: 0,
-        inboundEmails: 0,
-        outboundEmails: 0,
-        avgResponseTime: null,
-        lastEmailDate: null,
-    });
+app.get('/emails/metrics/:startupId', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        const snapshot = await db.collection('emails')
+            .where('startupId', '==', startupId)
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        const emails = snapshot.docs.map(doc => doc.data());
+        const inboundEmails = emails.filter(e => e.direction === 'inbound').length;
+        const outboundEmails = emails.filter(e => e.direction === 'outbound').length;
+        // Find last email date
+        let lastEmailDate = null;
+        if (emails.length > 0) {
+            const dates = emails.map(e => e.date?.toDate?.() || new Date(e.date)).filter(d => d);
+            if (dates.length > 0) {
+                lastEmailDate = new Date(Math.max(...dates.map(d => d.getTime()))).toISOString();
+            }
+        }
+        return res.json({
+            totalEmails: emails.length,
+            inboundEmails,
+            outboundEmails,
+            avgResponseTime: null,
+            lastEmailDate,
+        });
+    }
+    catch (error) {
+        console.error('Get email metrics error:', error);
+        return res.json({
+            totalEmails: 0,
+            inboundEmails: 0,
+            outboundEmails: 0,
+            avgResponseTime: null,
+            lastEmailDate: null,
+        });
+    }
 });
 app.post('/emails/:emailId/analyze', authenticate, async (_req, res) => {
     return res.json({ success: true, analysis: null });
