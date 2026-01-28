@@ -1,0 +1,46 @@
+{
+  "name": "functions",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "engines": {
+    "node": "20"
+  },
+  "main": "lib/index.js",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@prisma/client": "^6.2.1",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "express-validator": "^7.2.1",
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.3.0",
+    "helmet": "^8.0.0",
+    "imapflow": "^1.2.7",
+    "jsonwebtoken": "^9.0.2",
+    "mailparser": "^3.9.1",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/mailparser": "^3.4.6",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.7",
+    "firebase-functions-test": "^3.4.0",
+    "prisma": "^6.2.1",
+    "typescript": "^5.7.2"
+  },
+  "private": true
+}

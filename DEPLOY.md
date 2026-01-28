@@ -1,10 +1,65 @@
 # Startup Tracker - Production Deployment Guide
 
-## Deployment URLs
+## 🎉 Deployment Complete!
 
-- **Frontend (Vercel)**: https://startup-tracker-ten.vercel.app
-- **Backend (Render)**: [Pending - follow steps below]
-- **Database (Supabase)**: [Pending - follow steps below]
+| Service | Platform | URL | Status |
+|---------|----------|-----|--------|
+| Frontend | Firebase Hosting | https://startup-tracker-app.web.app | ✅ Live |
+| Backend | Cloud Functions | https://us-central1-startup-tracker-app.cloudfunctions.net/api | ✅ Live |
+| Database | In-Memory (MVP) | N/A | ✅ Running |
+
+## Access the Application
+
+🚀 **Live App**: https://startup-tracker-app.web.app
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/auth/register` | POST | Register new user |
+| `/api/auth/login` | POST | Login |
+| `/api/auth/me` | GET | Get current user |
+| `/api/startups` | GET | List startups |
+| `/api/startups` | POST | Create startup |
+| `/api/startups/:id` | GET/PATCH | Get/Update startup |
+
+### Test the API
+
+```bash
+# Health check
+curl https://us-central1-startup-tracker-app.cloudfunctions.net/api/health
+
+# Register
+curl -X POST https://us-central1-startup-tracker-app.cloudfunctions.net/api/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"secret","name":"Your Name","organizationName":"Your Org"}'
+```
+
+## Redeploy Commands
+
+```bash
+cd /Users/apple/Desktop/claude/startup-tracker
+
+# Redeploy backend (Cloud Functions)
+firebase deploy --only functions --project startup-tracker-app
+
+# Redeploy frontend (Hosting)
+npm run build --workspace=@startup-tracker/web
+firebase deploy --only hosting --project startup-tracker-app
+```
+
+## Note on Data Persistence
+
+⚠️ **Current MVP uses in-memory storage** - data resets on function cold start.
+
+To add persistent storage, upgrade to:
+- **Firestore** (recommended for Firebase)
+- **Cloud SQL PostgreSQL** (for full Prisma support)
+
+---
+
+## Alternative: Supabase + Render (If Needed)
 
 ## Step 1: Create Supabase Database
 

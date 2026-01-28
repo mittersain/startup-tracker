@@ -320,7 +320,7 @@ export default function StartupDetailPage() {
                 <Minus className="w-6 h-6 text-gray-400" />
               )}
             </div>
-            {startup.scoreTrendDelta !== 0 && (
+            {startup.scoreTrendDelta != null && startup.scoreTrendDelta !== 0 && (
               <p
                 className={clsx(
                   'text-sm font-medium mt-1',

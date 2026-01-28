@@ -1,0 +1,28 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow Cloud Functions (admin SDK) full access
+    // These rules only affect client-side access
+
+    // Users collection
+    match /users/{userId} {
+      allow read, write: if false; // Only admin SDK can access
+    }
+
+    // Organizations collection
+    match /organizations/{orgId} {
+      allow read, write: if false; // Only admin SDK can access
+    }
+
+    // Startups collection
+    match /startups/{startupId} {
+      allow read, write: if false; // Only admin SDK can access
+    }
+
+    // Proposal queue collection
+    match /proposalQueue/{proposalId} {
+      allow read, write: if false; // Only admin SDK can access
+    }
+  }
+}
