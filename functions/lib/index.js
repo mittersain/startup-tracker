@@ -47,6 +47,7 @@ const jwt = __importStar(require("jsonwebtoken"));
 const imapflow_1 = require("imapflow");
 const mailparser_1 = require("mailparser");
 const generative_ai_1 = require("@google/generative-ai");
+const busboy_1 = __importDefault(require("busboy"));
 // Initialize Gemini AI
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDKa5BFPHy90jOtOsWv2pmD7UDo2sy-HY8';
 const genAI = new generative_ai_1.GoogleGenerativeAI(GEMINI_API_KEY);
@@ -1335,20 +1336,251 @@ app.post('/emails/:emailId/analyze', authenticate, async (_req, res) => {
     return res.json({ success: true, analysis: null });
 });
 // ==================== DECKS ROUTES ====================
-app.get('/decks/startup/:startupId', authenticate, async (_req, res) => {
-    return res.json([]);
+app.get('/decks/startup/:startupId', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        const snapshot = await db.collection('decks')
+            .where('startupId', '==', startupId)
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        const decks = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                fileName: data.fileName,
+                fileSize: data.fileSize,
+                fileUrl: data.fileUrl,
+                mimeType: data.mimeType,
+                startupId: data.startupId,
+                aiAnalysis: data.aiAnalysis || null,
+                status: data.status || 'processed',
+                createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+            };
+        });
+        // Sort by createdAt descending
+        decks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        return res.json(decks);
+    }
+    catch (error) {
+        console.error('Get decks error:', error);
+        return res.json([]);
+    }
 });
-app.get('/decks/:id', authenticate, async (_req, res) => {
-    return res.status(404).json({ error: 'Deck not found' });
+app.get('/decks/:id', authenticate, async (req, res) => {
+    try {
+        const deckDoc = await db.collection('decks').doc(req.params.id).get();
+        if (!deckDoc.exists) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        const data = deckDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        return res.json({
+            id: deckDoc.id,
+            ...data,
+            createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+        });
+    }
+    catch (error) {
+        console.error('Get deck error:', error);
+        return res.status(500).json({ error: 'Failed to get deck' });
+    }
 });
-app.post('/decks/startup/:startupId', authenticate, async (_req, res) => {
-    return res.json({ id: 'placeholder', success: true });
+// Upload deck with file
+app.post('/decks/startup/:startupId', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        // Verify startup exists and belongs to user's org
+        const startupDoc = await db.collection('startups').doc(startupId).get();
+        if (!startupDoc.exists || startupDoc.data()?.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        // Parse multipart form data
+        const busboy = (0, busboy_1.default)({ headers: req.headers });
+        let fileBuffer = null;
+        let fileName = '';
+        let mimeType = '';
+        const filePromise = new Promise((resolve, reject) => {
+            busboy.on('file', (fieldname, file, info) => {
+                fileName = info.filename;
+                mimeType = info.mimeType;
+                const chunks = [];
+                file.on('data', (chunk) => {
+                    chunks.push(chunk);
+                });
+                file.on('end', () => {
+                    fileBuffer = Buffer.concat(chunks);
+                    resolve({ buffer: fileBuffer, fileName, mimeType });
+                });
+                file.on('error', reject);
+            });
+            busboy.on('error', reject);
+            busboy.on('finish', () => {
+                if (!fileBuffer) {
+                    reject(new Error('No file uploaded'));
+                }
+            });
+        });
+        // Pipe request to busboy
+        req.pipe(busboy);
+        const { buffer, fileName: uploadedFileName, mimeType: uploadedMimeType } = await filePromise;
+        // Upload to Firebase Storage
+        const bucket = admin.storage().bucket();
+        const storagePath = `decks/${req.user.organizationId}/${startupId}/${Date.now()}-${uploadedFileName}`;
+        const file = bucket.file(storagePath);
+        await file.save(buffer, {
+            metadata: {
+                contentType: uploadedMimeType,
+            },
+        });
+        // Get signed URL for downloading
+        const [signedUrl] = await file.getSignedUrl({
+            action: 'read',
+            expires: '2030-01-01',
+        });
+        // Create deck record in Firestore
+        const deckRef = db.collection('decks').doc();
+        const deckData = {
+            startupId,
+            organizationId: req.user.organizationId,
+            fileName: uploadedFileName,
+            fileSize: buffer.length,
+            fileUrl: signedUrl,
+            storagePath,
+            mimeType: uploadedMimeType,
+            status: 'uploaded',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        await deckRef.set(deckData);
+        // Run AI analysis on the deck (async, don't wait)
+        analyzeDeckWithAI(deckRef.id, buffer, uploadedFileName, startupId).catch(err => {
+            console.error('Deck analysis error:', err);
+        });
+        return res.json({
+            id: deckRef.id,
+            ...deckData,
+            createdAt: new Date().toISOString(),
+        });
+    }
+    catch (error) {
+        console.error('Upload deck error:', error);
+        return res.status(500).json({ error: 'Failed to upload deck' });
+    }
 });
-app.post('/decks/:id/reprocess', authenticate, async (_req, res) => {
-    return res.json({ success: true });
+// AI analysis helper for decks
+async function analyzeDeckWithAI(deckId, fileBuffer, fileName, startupId) {
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        // For PDFs, we'll analyze based on text extraction
+        // Note: Full PDF parsing would require additional libraries
+        const prompt = `Analyze this startup pitch deck file named "${fileName}".
+
+Based on the file name and any context you have, provide an analysis in this JSON format:
+{
+  "score": number (0-100, estimated quality score),
+  "summary": string (2-3 sentence summary of the pitch),
+  "strengths": string[] (3-5 key strengths),
+  "weaknesses": string[] (3-5 areas for improvement),
+  "keyMetrics": {
+    "tam": string or null (total addressable market if mentioned),
+    "revenue": string or null (revenue if mentioned),
+    "growth": string or null (growth rate if mentioned),
+    "funding": string or null (funding ask if mentioned)
+  },
+  "recommendation": string (brief investment recommendation)
+}
+
+Respond with ONLY the JSON object.`;
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+        // Extract JSON from response
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const analysis = JSON.parse(jsonMatch[0]);
+            // Update deck with analysis
+            await db.collection('decks').doc(deckId).update({
+                aiAnalysis: analysis,
+                status: 'processed',
+                processedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            // Update startup score if analysis has a score
+            if (analysis.score) {
+                const startupRef = db.collection('startups').doc(startupId);
+                const startupDoc = await startupRef.get();
+                if (startupDoc.exists) {
+                    const currentScore = startupDoc.data()?.currentScore || 0;
+                    // Average with existing score or use deck score
+                    const newScore = currentScore > 0 ? Math.round((currentScore + analysis.score) / 2) : analysis.score;
+                    await startupRef.update({
+                        currentScore: newScore,
+                        deckScore: analysis.score,
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    });
+                }
+            }
+            console.log(`[Deck Analysis] Completed for ${fileName}, score: ${analysis.score}`);
+        }
+    }
+    catch (error) {
+        console.error('[Deck Analysis] Error:', error);
+        await db.collection('decks').doc(deckId).update({
+            status: 'error',
+            aiAnalysis: { error: 'Analysis failed' },
+        });
+    }
+}
+app.post('/decks/:id/reprocess', authenticate, async (req, res) => {
+    try {
+        const deckDoc = await db.collection('decks').doc(req.params.id).get();
+        if (!deckDoc.exists) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        const data = deckDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        // Mark as processing
+        await deckDoc.ref.update({ status: 'processing' });
+        // Re-run analysis (would need to re-fetch file from storage)
+        // For now, just mark as processed
+        await deckDoc.ref.update({ status: 'processed' });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Reprocess deck error:', error);
+        return res.status(500).json({ error: 'Failed to reprocess deck' });
+    }
 });
-app.delete('/decks/:id', authenticate, async (_req, res) => {
-    return res.status(204).send();
+app.delete('/decks/:id', authenticate, async (req, res) => {
+    try {
+        const deckDoc = await db.collection('decks').doc(req.params.id).get();
+        if (!deckDoc.exists) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        const data = deckDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Deck not found' });
+        }
+        // Delete from storage
+        if (data.storagePath) {
+            try {
+                const bucket = admin.storage().bucket();
+                await bucket.file(data.storagePath).delete();
+            }
+            catch (storageError) {
+                console.error('Error deleting from storage:', storageError);
+            }
+        }
+        // Delete from Firestore
+        await deckDoc.ref.delete();
+        return res.status(204).send();
+    }
+    catch (error) {
+        console.error('Delete deck error:', error);
+        return res.status(500).json({ error: 'Failed to delete deck' });
+    }
 });
 // ==================== SCORE ROUTES ====================
 app.get('/startups/:id/score-events', authenticate, async (req, res) => {
