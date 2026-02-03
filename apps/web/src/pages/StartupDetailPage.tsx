@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { startupsApi, decksApi, emailsApi } from '@/services/api';
 import { useAuthStore } from '@/stores/auth.store';
 import { useDropzone } from 'react-dropzone';
+import DOMPurify from 'isomorphic-dompurify';
 import {
   ArrowLeft,
   TrendingUp,
@@ -2419,7 +2420,12 @@ export default function StartupDetailPage() {
                   {selectedEmail.bodyHtml ? (
                     <div
                       className="prose prose-sm max-w-none"
-                      dangerouslySetInnerHTML={{ __html: selectedEmail.bodyHtml }}
+                      dangerouslySetInnerHTML={{
+                        __html: DOMPurify.sanitize(selectedEmail.bodyHtml, {
+                          ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code', 'div', 'span'],
+                          ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style']
+                        })
+                      }}
                     />
                   ) : (
                     <p className="text-gray-700 whitespace-pre-wrap">{selectedEmail.bodyPreview}</p>

@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 
 import { errorHandler } from './middleware/error-handler.js';
 import { authRouter } from './routes/auth.routes.js';
@@ -48,6 +49,37 @@ try {
 const app = express();
 const PORT = process.env['PORT'] ?? 3001;
 
+// SECURITY: Rate limiting for authentication endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login attempts per windowMs
+  message: 'Too many login attempts from this IP, please try again after 15 minutes',
+  standardHeaders: true, // Return rate limit info in RateLimit-* headers
+  legacyHeaders: false, // Disable X-RateLimit-* headers
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'TOO_MANY_REQUESTS',
+      message: 'Too many login attempts from this IP, please try again after 15 minutes',
+      retryAfter: 15 * 60 // seconds
+    });
+  }
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // Limit each IP to 3 registration attempts per hour
+  message: 'Too many registration attempts from this IP, please try again after an hour',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'TOO_MANY_REQUESTS',
+      message: 'Too many registration attempts from this IP, please try again after an hour',
+      retryAfter: 60 * 60 // seconds
+    });
+  }
+});
+
 // Middleware
 app.use(helmet());
 app.use(cors({
@@ -63,6 +95,9 @@ app.get('/health', (_req, res) => {
 });
 
 // API Routes
+// Apply rate limiting to auth endpoints BEFORE mounting the router
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', registerLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/startups', startupsRouter);
 app.use('/api/decks', decksRouter);

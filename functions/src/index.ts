@@ -912,7 +912,8 @@ app.post('/startups/:id/send-decision-email', authenticate, async (req: AuthRequ
         pass: config.password,
       },
       tls: {
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
 
@@ -2509,7 +2510,8 @@ async function sendEmailViaSMTP(config: {host: string; port: number; user: strin
         pass: config.password,
       },
       tls: {
-        rejectUnauthorized: false, // Accept self-signed certificates
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
 
@@ -2581,7 +2583,8 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
       },
       logger: false,
       tls: {
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
 
@@ -2946,7 +2949,8 @@ app.post('/inbox/test', authenticate, async (req: AuthRequest, res) => {
       },
       logger: false,
       tls: {
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
 
@@ -4889,7 +4893,8 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
       },
       logger: false,
       tls: {
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
 
