@@ -314,6 +314,7 @@ export class StartupService {
       reviewing: 0,
       due_diligence: 0,
       invested: 0,
+      snoozed: 0,
       passed: 0,
       archived: 0,
     };
