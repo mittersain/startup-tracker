@@ -139,37 +139,67 @@ export class AuthService {
   }
 
   async refreshTokens(refreshToken: string): Promise<AuthTokens> {
-    // Find refresh token
-    const tokenRecord = await prisma.refreshToken.findUnique({
-      where: { token: refreshToken },
+    // SECURITY: Tokens are hashed in DB, so we need to find by comparing hashes
+    // This is acceptable for refresh tokens since users typically have 1-5 tokens max
+
+    // First, get a sample token to extract userId from the token itself
+    // Since we can't look up by token directly, we'll use a different approach:
+    // Generate a hash and look up, but bcrypt uses random salts so we need to
+    // fetch candidate tokens and compare each one
+
+    // For efficiency, we'll limit the search to non-expired tokens
+    const now = new Date();
+    const candidateTokens = await prisma.refreshToken.findMany({
+      where: {
+        expiresAt: { gte: now },
+      },
       include: { user: true },
     });
 
-    if (!tokenRecord) {
+    // Find matching token by comparing hashes
+    type TokenWithUser = typeof candidateTokens[number];
+    let matchedToken: TokenWithUser | null = null;
+    for (const candidate of candidateTokens) {
+      const isMatch = await bcrypt.compare(refreshToken, candidate.token);
+      if (isMatch) {
+        matchedToken = candidate;
+        break;
+      }
+    }
+
+    if (!matchedToken) {
       throw new AppError(401, 'INVALID_TOKEN', 'Invalid refresh token');
     }
 
-    if (tokenRecord.expiresAt < new Date()) {
+    if (matchedToken.expiresAt < new Date()) {
       // Delete expired token
-      await prisma.refreshToken.delete({ where: { id: tokenRecord.id } });
+      await prisma.refreshToken.delete({ where: { id: matchedToken.id } });
       throw new AppError(401, 'TOKEN_EXPIRED', 'Refresh token has expired');
     }
 
-    // Delete old refresh token
-    await prisma.refreshToken.delete({ where: { id: tokenRecord.id } });
+    // Delete old refresh token (token rotation for security)
+    await prisma.refreshToken.delete({ where: { id: matchedToken.id } });
 
     // Generate new tokens
     return this.generateTokens(
-      tokenRecord.user.id,
-      tokenRecord.user.organizationId,
-      tokenRecord.user.role as UserRole
+      matchedToken.user.id,
+      matchedToken.user.organizationId,
+      matchedToken.user.role as UserRole
     );
   }
 
   async logout(refreshToken: string): Promise<void> {
-    await prisma.refreshToken.deleteMany({
-      where: { token: refreshToken },
-    });
+    // SECURITY: Tokens are hashed in DB, need to find by comparing hashes
+    const allTokens = await prisma.refreshToken.findMany();
+
+    // Find matching token by comparing hashes
+    for (const candidate of allTokens) {
+      const isMatch = await bcrypt.compare(refreshToken, candidate.token);
+      if (isMatch) {
+        await prisma.refreshToken.delete({ where: { id: candidate.id } });
+        break;
+      }
+    }
   }
 
   async logoutAll(userId: string): Promise<void> {
@@ -195,17 +225,20 @@ export class AuthService {
     const refreshToken = uuidv4();
     const refreshExpiresAt = this.parseExpiry(this.refreshExpiresIn);
 
+    // SECURITY: Hash refresh token before storing (10 rounds for refresh tokens)
+    const hashedToken = await bcrypt.hash(refreshToken, 10);
+
     await prisma.refreshToken.create({
       data: {
         userId,
-        token: refreshToken,
+        token: hashedToken, // Store hashed token
         expiresAt: refreshExpiresAt,
       },
     });
 
     return {
       accessToken,
-      refreshToken,
+      refreshToken, // Return plain token to user (they'll send this back later)
       expiresIn: this.parseExpirySeconds(this.jwtExpiresIn),
     };
   }

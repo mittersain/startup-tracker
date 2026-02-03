@@ -202,6 +202,7 @@ model ScoreEvent {
 
   @@index([startupId, timestamp(sort: Desc)])
   @@index([category])
+  @@index([startupId, category, timestamp(sort: Desc)]) // Filter by category + time
   @@map("score_events")
 }
 
@@ -290,6 +291,7 @@ model Email {
   @@index([organizationId, receivedAt(sort: Desc)])
   @@index([startupId, receivedAt(sort: Desc)])
   @@index([fromAddress])
+  @@index([conversationId, receivedAt(sort: Desc)]) // Email thread queries
   @@map("emails")
 }
 
@@ -337,6 +339,7 @@ model ActivityLog {
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@index([startupId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)]) // User's recent activity
   @@map("activity_logs")
 }
 
@@ -412,6 +415,7 @@ model ProposalQueue {
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@index([userId])
   @@index([founderEmail])
+  @@index([organizationId, status, snoozedUntil]) // Snooze reminder queries
   @@map("proposal_queue")
 }
 
@@ -491,6 +495,7 @@ model StartupEvaluation {
 
   @@index([organizationId])
   @@index([totalScore])
+  @@index([organizationId, stage]) // Filter evaluations by stage
   @@map("startup_evaluations")
 }
 
