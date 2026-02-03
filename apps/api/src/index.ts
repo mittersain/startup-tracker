@@ -81,7 +81,33 @@ const registerLimiter = rateLimit({
 });
 
 // Middleware
-app.use(helmet());
+// SECURITY: Enhanced security headers with Helmet
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"], // Allow inline styles for React
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", 'data:'],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Allow embedding for development
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow cross-origin requests
+  hsts: {
+    maxAge: 31536000, // 1 year in seconds
+    includeSubDomains: true,
+    preload: true,
+  },
+  noSniff: true, // X-Content-Type-Options: nosniff
+  frameguard: { action: 'deny' }, // X-Frame-Options: DENY
+  xssFilter: true, // X-XSS-Protection: 1; mode=block
+}));
+
 app.use(cors({
   origin: process.env['CORS_ORIGIN'] ?? 'http://localhost:5173',
   credentials: true,

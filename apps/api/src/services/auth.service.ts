@@ -19,19 +19,71 @@ interface LoginInput {
   password: string;
 }
 
+interface LoginAttempt {
+  attempts: number;
+  lockedUntil?: Date;
+}
+
 export class AuthService {
   private jwtSecret: string;
   private jwtExpiresIn: string;
   private refreshExpiresIn: string;
+  private loginAttempts: Map<string, LoginAttempt>;
+  private readonly MAX_LOGIN_ATTEMPTS = 5;
+  private readonly LOCKOUT_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
   constructor() {
     this.jwtSecret = process.env['JWT_SECRET'] ?? '';
     this.jwtExpiresIn = process.env['JWT_EXPIRES_IN'] ?? '7d';
     this.refreshExpiresIn = process.env['JWT_REFRESH_EXPIRES_IN'] ?? '30d';
+    this.loginAttempts = new Map();
 
     if (!this.jwtSecret) {
       throw new Error('JWT_SECRET environment variable is required');
     }
+
+    // Cleanup old attempts every hour
+    setInterval(() => this.cleanupOldAttempts(), 60 * 60 * 1000);
+  }
+
+  private cleanupOldAttempts(): void {
+    const now = new Date();
+    for (const [email, attempt] of this.loginAttempts.entries()) {
+      if (attempt.lockedUntil && attempt.lockedUntil < now) {
+        this.loginAttempts.delete(email);
+      }
+    }
+  }
+
+  private isAccountLocked(email: string): { locked: boolean; lockedUntil?: Date } {
+    const attempt = this.loginAttempts.get(email);
+    if (!attempt?.lockedUntil) {
+      return { locked: false };
+    }
+
+    const now = new Date();
+    if (attempt.lockedUntil > now) {
+      return { locked: true, lockedUntil: attempt.lockedUntil };
+    }
+
+    // Lock expired, clear it
+    this.loginAttempts.delete(email);
+    return { locked: false };
+  }
+
+  private recordFailedLogin(email: string): void {
+    const attempt = this.loginAttempts.get(email) || { attempts: 0 };
+    attempt.attempts += 1;
+
+    if (attempt.attempts >= this.MAX_LOGIN_ATTEMPTS) {
+      attempt.lockedUntil = new Date(Date.now() + this.LOCKOUT_DURATION_MS);
+    }
+
+    this.loginAttempts.set(email, attempt);
+  }
+
+  private clearFailedLogins(email: string): void {
+    this.loginAttempts.delete(email);
   }
 
   async register(input: RegisterInput): Promise<{ user: object; tokens: AuthTokens }> {
@@ -105,6 +157,19 @@ export class AuthService {
   async login(input: LoginInput): Promise<{ user: object; tokens: AuthTokens }> {
     const { email, password } = input;
 
+    // SECURITY: Check if account is locked
+    const lockStatus = this.isAccountLocked(email);
+    if (lockStatus.locked && lockStatus.lockedUntil) {
+      const minutesRemaining = Math.ceil(
+        (lockStatus.lockedUntil.getTime() - Date.now()) / (60 * 1000)
+      );
+      throw new AppError(
+        429,
+        'ACCOUNT_LOCKED',
+        `Account is locked due to too many failed login attempts. Try again in ${minutesRemaining} minutes.`
+      );
+    }
+
     // Find user
     const user = await prisma.user.findUnique({
       where: { email },
@@ -120,14 +185,36 @@ export class AuthService {
     });
 
     if (!user) {
+      // SECURITY: Record failed attempt for non-existent user (prevent user enumeration timing attacks)
+      this.recordFailedLogin(email);
       throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
     }
 
     // Verify password
     const isValid = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) {
-      throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
+      // SECURITY: Record failed login attempt
+      this.recordFailedLogin(email);
+      const attempt = this.loginAttempts.get(email);
+      const attemptsLeft = this.MAX_LOGIN_ATTEMPTS - (attempt?.attempts || 0);
+
+      if (attemptsLeft > 0) {
+        throw new AppError(
+          401,
+          'INVALID_CREDENTIALS',
+          `Invalid email or password. ${attemptsLeft} attempts remaining before account lock.`
+        );
+      } else {
+        throw new AppError(
+          429,
+          'ACCOUNT_LOCKED',
+          'Account locked due to too many failed login attempts. Try again in 30 minutes.'
+        );
+      }
     }
+
+    // SECURITY: Clear failed attempts on successful login
+    this.clearFailedLogins(email);
 
     // Generate tokens
     const tokens = await this.generateTokens(user.id, user.organizationId, user.role as UserRole);
