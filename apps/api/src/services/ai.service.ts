@@ -16,7 +16,7 @@ import type {
 
 export class AIService {
   private client: GoogleGenerativeAI | null = null;
-  private model = 'gemini-2.0-flash';
+  private model = 'gemini-1.5-flash'; // Fixed: using valid Gemini model name
   private _enabled = false;
 
   constructor() {
@@ -24,7 +24,7 @@ export class AIService {
     if (apiKey) {
       this.client = new GoogleGenerativeAI(apiKey);
       this._enabled = true;
-      console.log('AI Service enabled (Gemini)');
+      console.log(`AI Service enabled (Gemini ${this.model})`);
     } else {
       console.log('AI Service disabled - GEMINI_API_KEY not set');
     }
