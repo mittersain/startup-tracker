@@ -452,7 +452,7 @@ function DatabaseBackupSettings() {
               Automatic backups keep your data safe. Manual backups available anytime.
             </p>
 
-            {status && (
+            {status && status.stats && (
               <div className="mt-3 space-y-2">
                 <div className="flex items-center gap-4 text-sm">
                   <span className="flex items-center gap-1 text-gray-600">

@@ -9,9 +9,10 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser, ParsedMail } from 'mailparser';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Busboy from 'busboy';
+import * as nodemailer from 'nodemailer';
 
 // Initialize Gemini AI
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDKa5BFPHy90jOtOsWv2pmD7UDo2sy-HY8';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyBCm14Vneq_iwRCQhUb2pIkn-C6IRLUZD8';
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // AI Helper function to extract startup proposal from email
@@ -150,9 +151,24 @@ Provide your analysis as a JSON object with this exact structure:
     },
     "strengths": string[] (3-5 key strengths),
     "concerns": string[] (3-5 key concerns or risks),
-    "keyQuestions": string[] (3-5 questions to ask the founders)
+    "keyQuestions": string[] (5-8 specific, insightful questions to ask the founders covering: traction metrics, unit economics, competitive differentiation, go-to-market strategy, team background, funding history, and growth plans)
   },
-  "draftReply": string (a professional, personalized email reply to the founder acknowledging their pitch, asking 2-3 clarifying questions, and expressing interest in learning more. Sign as "Nitish" and keep it warm but professional.)
+  "draftReply": string (a professional, warm email reply to the founder that:
+    1. Opens with a personalized acknowledgment of their pitch and what caught your attention
+    2. Includes ALL the keyQuestions formatted as a numbered list for clarity
+    3. Expresses genuine interest in learning more
+    4. Signs off as "Nitish"
+
+    The email should be comprehensive and include questions about:
+    - Current traction and key metrics (users, revenue, growth rate)
+    - Unit economics and path to profitability
+    - Competitive landscape and differentiation
+    - Team background and relevant experience
+    - Funding history and current runway
+    - Go-to-market strategy and customer acquisition
+    - Near-term and long-term vision
+
+    Format the questions as a clear numbered list within the email body.)
 }
 
 Be realistic in your scoring. Early-stage startups with limited info should score 40-60. Only exceptional startups with strong traction score above 70.
@@ -176,6 +192,94 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     console.error('[AI Analyze] Error analyzing startup:', error);
     return null;
   }
+}
+
+// AI Helper function to analyze an attachment (pitch deck, document)
+async function analyzeAttachmentWithAI(fileName: string, mimeType: string, startupName: string): Promise<{
+  score: number;
+  summary: string;
+  strengths: string[];
+  weaknesses: string[];
+  keyMetrics: Record<string, string | null>;
+} | null> {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const fileType = mimeType.includes('pdf') ? 'PDF' :
+                     mimeType.includes('presentation') || mimeType.includes('powerpoint') ? 'Pitch Deck' :
+                     mimeType.includes('word') || mimeType.includes('document') ? 'Document' : 'File';
+
+    const prompt = `Analyze this ${fileType} attachment from a startup pitch.
+
+Startup Name: ${startupName}
+File Name: ${fileName}
+File Type: ${fileType}
+
+Based on the file name, type, and the startup context, provide your best assessment of what this pitch deck/document likely contains and score it. Common pitch decks include: problem/solution, market size, team, traction, financials, ask.
+
+Respond with ONLY a JSON object:
+{
+  "score": number (0-100, quality/completeness estimate based on typical pitch decks),
+  "summary": string (2-3 sentence summary of what this document likely covers),
+  "strengths": string[] (3-4 potential strengths based on typical pitch content),
+  "weaknesses": string[] (3-4 areas that would need clarification or are commonly weak),
+  "keyMetrics": {
+    "tam": string or null (typical TAM question to ask),
+    "revenue": string or null (revenue question to ask),
+    "growth": string or null (growth question to ask),
+    "funding": string or null (funding question to ask)
+  }
+}
+
+Be realistic - without seeing the actual content, provide thoughtful questions based on what's typically missing from early-stage pitch decks.`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.log('[AI Attachment] No JSON found in response');
+      return null;
+    }
+
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    console.error('[AI Attachment] Error analyzing attachment:', error);
+    return null;
+  }
+}
+
+// Helper function to generate draft reply incorporating attachment analysis
+function generateDraftReplyWithAttachments(
+  baseDraftReply: string,
+  attachmentAnalyses: Array<{ fileName: string; score: number; summary: string; weaknesses: string[] }>,
+  startupName: string,
+  founderName: string
+): string {
+  if (!attachmentAnalyses.length) return baseDraftReply;
+
+  // Extract key questions from attachment weaknesses
+  const attachmentQuestions = attachmentAnalyses
+    .flatMap(a => a.weaknesses.slice(0, 2))
+    .slice(0, 3);
+
+  const attachmentMentions = attachmentAnalyses.map(a => a.fileName).join(', ');
+
+  return `Hi ${founderName || 'there'},
+
+Thank you for reaching out about ${startupName}. I've reviewed your email and the attached materials (${attachmentMentions}) with interest.
+
+Based on my initial review, I have a few questions that would help me better understand your opportunity:
+
+${attachmentQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+I'd also love to understand more about your team's background and what led you to focus on this problem.
+
+Looking forward to learning more!
+
+Best,
+Nitish`;
 }
 
 // Initialize Firebase Admin
@@ -373,7 +477,7 @@ const authenticate = (req: AuthRequest, res: express.Response, next: express.Nex
 
 app.get('/startups', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { status, stage, search, page = 1, pageSize = 50 } = req.query;
+    const { status, excludeStatus, stage, search, page = 1, pageSize = 50 } = req.query;
 
     // Simple query without complex ordering to avoid index requirements
     const snapshot = await db.collection('startups')
@@ -406,6 +510,12 @@ app.get('/startups', authenticate, async (req: AuthRequest, res) => {
     // Client-side filtering
     if (status && status !== 'all') {
       startups = startups.filter(s => s.status === status);
+    }
+
+    // Exclude specific statuses (can be comma-separated, e.g., "passed,snoozed")
+    if (excludeStatus) {
+      const excludeList = (excludeStatus as string).split(',').map(s => s.trim());
+      startups = startups.filter(s => !excludeList.includes(s.status));
     }
 
     if (stage && stage !== 'all') {
@@ -520,11 +630,31 @@ app.get('/startups/:id', authenticate, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: 'Startup not found' });
     }
 
+    // Helper to convert Firestore Timestamp to ISO string
+    const toISOString = (val: unknown): string | undefined => {
+      if (!val) return undefined;
+      if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+        return (val as { toDate: () => Date }).toDate().toISOString();
+      }
+      if (val instanceof Date) {
+        return val.toISOString();
+      }
+      if (typeof val === 'string') {
+        return val;
+      }
+      return undefined;
+    };
+
     return res.json({
       id: startupDoc.id,
       ...data,
-      createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
-      updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt,
+      createdAt: toISOString(data.createdAt),
+      updatedAt: toISOString(data.updatedAt),
+      snoozedAt: toISOString(data.snoozedAt),
+      snoozeFollowUpDate: toISOString(data.snoozeFollowUpDate),
+      passedAt: toISOString(data.passedAt),
+      snoozeEmailSentAt: toISOString(data.snoozeEmailSentAt),
+      passEmailSentAt: toISOString(data.passEmailSentAt),
     });
   } catch (error) {
     console.error('Get startup error:', error);
@@ -595,6 +725,1630 @@ app.patch('/startups/:id/status', authenticate, async (req: AuthRequest, res) =>
   } catch (error) {
     console.error('Update status error:', error);
     return res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+// Snooze a startup deal with reason and schedule follow-up
+app.post('/startups/:id/snooze', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { reason, followUpMonths = 3 } = req.body;
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Generate AI draft email for snooze
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
+
+    const prompt = `You are a professional venture capital investor. Write a polite email to the founder explaining that you're putting their startup on hold for now but would like to follow up in ${followUpMonths} months.
+
+Startup: ${data.name}
+Founder: ${data.founderName || 'Founder'}
+Business Context: ${businessContext}
+Investor's Reason for Snoozing: ${reason}
+
+The email should:
+1. Be professional and encouraging
+2. Acknowledge the potential of the business
+3. Explain that the timing isn't right now based on the investor's reason
+4. Request the founder to keep you updated on their progress (monthly updates preferred)
+5. Mention that you'll proactively follow up in ${followUpMonths} months
+6. Keep the door open for future investment
+7. Be concise (under 200 words)
+
+Write ONLY the email body, no subject line. Sign off as "Best regards" without a name.`;
+
+    const aiResult = await model.generateContent(prompt);
+    const draftEmail = aiResult.response.text().trim();
+
+    // Calculate follow-up date
+    const followUpDate = new Date();
+    followUpDate.setMonth(followUpDate.getMonth() + followUpMonths);
+
+    // Update startup status and save snooze details
+    await startupRef.update({
+      status: 'snoozed',
+      snoozeReason: reason,
+      snoozedAt: admin.firestore.FieldValue.serverTimestamp(),
+      snoozeFollowUpDate: followUpDate,
+      snoozeDraftEmail: draftEmail,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Create a follow-up reminder
+    await db.collection('reminders').add({
+      organizationId: req.user!.organizationId,
+      startupId: req.params.id,
+      startupName: data.name,
+      type: 'snooze_followup',
+      dueDate: followUpDate,
+      reason: reason,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      draftEmail,
+      followUpDate: followUpDate.toISOString(),
+      message: `Deal snoozed. Follow-up scheduled for ${followUpDate.toLocaleDateString()}`,
+    });
+  } catch (error) {
+    console.error('Snooze startup error:', error);
+    return res.status(500).json({ error: 'Failed to snooze startup' });
+  }
+});
+
+// Pass on a startup deal with reason
+app.post('/startups/:id/pass', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { reason } = req.body;
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Generate AI draft email for pass
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
+
+    const prompt = `You are a professional venture capital investor. Write a polite rejection email to the founder explaining that you've decided to pass on their startup.
+
+Startup: ${data.name}
+Founder: ${data.founderName || 'Founder'}
+Business Context: ${businessContext}
+Investor's Reason for Passing: ${reason}
+
+The email should:
+1. Be respectful and professional
+2. Thank them for considering you
+3. Provide constructive feedback based on the investor's reason without being harsh
+4. Wish them success in their journey
+5. Keep it brief and kind (under 150 words)
+6. NOT leave the door open for future investment (this is a definitive pass)
+
+Write ONLY the email body, no subject line. Sign off as "Best regards" without a name.`;
+
+    const aiResult = await model.generateContent(prompt);
+    const draftEmail = aiResult.response.text().trim();
+
+    // Update startup status and save pass details
+    await startupRef.update({
+      status: 'passed',
+      passReason: reason,
+      passedAt: admin.firestore.FieldValue.serverTimestamp(),
+      passDraftEmail: draftEmail,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      draftEmail,
+      message: 'Deal passed. Draft email generated.',
+    });
+  } catch (error) {
+    console.error('Pass startup error:', error);
+    return res.status(500).json({ error: 'Failed to pass on startup' });
+  }
+});
+
+// Send snooze or pass email
+app.post('/startups/:id/send-decision-email', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { emailBody, emailSubject } = req.body;
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    if (!data.founderEmail) {
+      return res.status(400).json({ error: 'No founder email available' });
+    }
+
+    // Get SMTP config
+    const config = await getInboxConfig(req.user!.organizationId);
+    if (!config) {
+      return res.status(400).json({ error: 'No email configuration found. Please configure your inbox in Settings.' });
+    }
+
+    // Derive SMTP settings from IMAP config
+    const smtpHost = config.host.replace('imap.', 'smtp.');
+    const smtpPort = 587;
+
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: false,
+      auth: {
+        user: config.user,
+        pass: config.password,
+      },
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Nitish" <${config.user}>`,
+      to: data.founderEmail,
+      subject: emailSubject || `Re: ${data.name}`,
+      text: emailBody,
+    };
+
+    const sendResult = await transporter.sendMail(mailOptions);
+
+    // Record the sent email
+    const emailRef = db.collection('emails').doc();
+    await emailRef.set({
+      startupId: req.params.id,
+      organizationId: req.user!.organizationId,
+      subject: mailOptions.subject,
+      from: config.user,
+      fromName: 'Nitish',
+      to: data.founderEmail,
+      body: emailBody,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      direction: 'outbound',
+      sentAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      smtpMessageId: sendResult.messageId,
+      emailType: data.status === 'snoozed' ? 'snooze' : 'pass',
+    });
+
+    // Update the startup to mark email as sent
+    const updateData: Record<string, unknown> = {
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (data.status === 'snoozed') {
+      updateData.snoozeEmailSent = true;
+      updateData.snoozeEmailSentAt = admin.firestore.FieldValue.serverTimestamp();
+    } else if (data.status === 'passed') {
+      updateData.passEmailSent = true;
+      updateData.passEmailSentAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    await startupRef.update(updateData);
+
+    return res.json({
+      success: true,
+      to: data.founderEmail,
+      messageId: sendResult.messageId,
+    });
+  } catch (error) {
+    console.error('Send decision email error:', error);
+    return res.status(500).json({ error: 'Failed to send email' });
+  }
+});
+
+// ==========================================
+// AI Chat for Startup Discussion
+// ==========================================
+
+// Get chat history for a startup
+app.get('/startups/:id/chat', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Get chat messages
+    const chatSnapshot = await db.collection('startups').doc(req.params.id as string)
+      .collection('chat')
+      .orderBy('createdAt', 'asc')
+      .limit(100)
+      .get();
+
+    const messages = chatSnapshot.docs.map(doc => {
+      const msgData = doc.data();
+      return {
+        id: doc.id,
+        role: msgData.role,
+        content: msgData.content,
+        createdAt: msgData.createdAt?.toDate?.()?.toISOString() || msgData.createdAt,
+      };
+    });
+
+    return res.json({ messages });
+  } catch (error) {
+    console.error('Get chat history error:', error);
+    return res.status(500).json({ error: 'Failed to get chat history' });
+  }
+});
+
+// Send a chat message and get AI response
+app.post('/startups/:id/chat', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { message } = req.body;
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    if (startupData.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const chatCollection = startupRef.collection('chat');
+
+    // Save user message
+    const userMsgRef = await chatCollection.add({
+      role: 'user',
+      content: message,
+      userId: req.user!.userId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Get recent chat history for context (last 20 messages)
+    const recentChatSnapshot = await chatCollection
+      .orderBy('createdAt', 'desc')
+      .limit(20)
+      .get();
+
+    const chatHistory = recentChatSnapshot.docs
+      .reverse()
+      .slice(0, -1) // Exclude the message we just added
+      .map(doc => {
+        const d = doc.data();
+        return { role: d.role, content: d.content };
+      });
+
+    // Build context about the startup
+    const startupContext = `
+Startup Information:
+- Name: ${startupData.name}
+- Status: ${startupData.status}
+- Stage: ${startupData.stage || 'Unknown'}
+- Sector: ${startupData.sector || 'Unknown'}
+- Description: ${startupData.description || 'No description'}
+- Current Score: ${startupData.currentScore ?? 'Not scored'}
+- Website: ${startupData.website || 'Not provided'}
+- Founder Email: ${startupData.founderEmail || 'Not provided'}
+
+${startupData.businessModelAnalysis ? `
+Business Model Analysis:
+- Business Type: ${startupData.businessModelAnalysis.businessModel?.type || 'Unknown'}
+- Value Proposition: ${startupData.businessModelAnalysis.businessModel?.valueProposition || 'Unknown'}
+- Revenue Streams: ${startupData.businessModelAnalysis.businessModel?.revenueStreams?.join(', ') || 'Unknown'}
+- Customer Segments: ${startupData.businessModelAnalysis.businessModel?.customerSegments?.join(', ') || 'Unknown'}
+- Market Size: ${startupData.businessModelAnalysis.marketAnalysis?.marketSize || 'Unknown'}
+- Competition: ${startupData.businessModelAnalysis.marketAnalysis?.competition || 'Unknown'}
+- Timing: ${startupData.businessModelAnalysis.marketAnalysis?.timing || 'Unknown'}
+- Strengths: ${startupData.businessModelAnalysis.strengths?.join('; ') || 'None identified'}
+- Concerns: ${startupData.businessModelAnalysis.concerns?.join('; ') || 'None identified'}
+- Key Questions: ${startupData.businessModelAnalysis.keyQuestions?.join('; ') || 'None'}
+` : ''}
+
+${startupData.snoozeReason ? `Snooze Reason: ${startupData.snoozeReason}` : ''}
+${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
+`;
+
+    // Generate AI response
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const systemPrompt = `You are an AI assistant helping a venture capital investor analyze and discuss startup investment opportunities. You have access to detailed information about the startup being discussed.
+
+${startupContext}
+
+You should:
+1. Provide thoughtful analysis based on the startup's information
+2. Help identify potential risks and opportunities
+3. Suggest relevant due diligence questions
+4. Compare to industry standards when relevant
+5. Be direct and concise in your responses
+6. If you don't have enough information to answer, say so clearly
+
+Previous conversation context is provided to maintain continuity.`;
+
+    // Build the conversation for Gemini
+    const conversationParts = [
+      { text: systemPrompt },
+      ...chatHistory.flatMap(msg => [
+        { text: `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}` }
+      ]),
+      { text: `User: ${message}` },
+      { text: 'Assistant:' }
+    ];
+
+    const result = await model.generateContent(conversationParts.map(p => p.text).join('\n\n'));
+    const aiResponse = result.response.text().trim();
+
+    // Save AI response
+    const aiMsgRef = await chatCollection.add({
+      role: 'assistant',
+      content: aiResponse,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      userMessage: {
+        id: userMsgRef.id,
+        role: 'user',
+        content: message,
+        createdAt: new Date().toISOString(),
+      },
+      aiMessage: {
+        id: aiMsgRef.id,
+        role: 'assistant',
+        content: aiResponse,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('Chat error:', error);
+    return res.status(500).json({ error: 'Failed to process chat message' });
+  }
+});
+
+// Clear chat history for a startup
+app.delete('/startups/:id/chat', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Delete all chat messages
+    const chatSnapshot = await startupRef.collection('chat').get();
+    const batch = db.batch();
+    chatSnapshot.docs.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+    await batch.commit();
+
+    return res.json({ success: true, deletedCount: chatSnapshot.size });
+  } catch (error) {
+    console.error('Clear chat error:', error);
+    return res.status(500).json({ error: 'Failed to clear chat history' });
+  }
+});
+
+// ==========================================
+// Auto-Enrichment Service
+// ==========================================
+
+interface EnrichmentData {
+  // Company data
+  website?: {
+    title?: string;
+    description?: string;
+    teamMembers?: Array<{ name: string; role: string; linkedIn?: string }>;
+    pricing?: string;
+    features?: string[];
+    techStack?: string[];
+    scrapedAt: string;
+  };
+  // Crunchbase data
+  crunchbase?: {
+    name?: string;
+    shortDescription?: string;
+    foundedOn?: string;
+    numEmployeesEnum?: string;
+    totalFundingUsd?: number;
+    lastFundingType?: string;
+    lastFundingDate?: string;
+    numFundingRounds?: number;
+    investors?: string[];
+    categories?: string[];
+    headquarters?: string;
+    websiteUrl?: string;
+    linkedInUrl?: string;
+    twitterUrl?: string;
+    founders?: Array<{ name: string; title: string; linkedIn?: string }>;
+    competitors?: Array<{ name: string; shortDescription?: string }>;
+    fetchedAt: string;
+  };
+  // News data
+  news?: {
+    articles: Array<{
+      title: string;
+      source: string;
+      url: string;
+      publishedAt: string;
+      snippet?: string;
+    }>;
+    fetchedAt: string;
+  };
+  // LinkedIn company data
+  linkedin?: {
+    companyName?: string;
+    tagline?: string;
+    description?: string;
+    industry?: string;
+    companySize?: string;
+    headquarters?: string;
+    foundedYear?: string;
+    specialties?: string[];
+    websiteUrl?: string;
+    employeeCount?: string;
+    followerCount?: number;
+    companyUrl?: string;
+    fetchedAt: string;
+    source: 'linkedin_api' | 'ai_research';
+  };
+  // LinkedIn founder/team data
+  founders?: Array<{
+    name: string;
+    linkedInUrl?: string;
+    currentRole?: string;
+    headline?: string;
+    location?: string;
+    previousCompanies?: Array<{ name: string; role: string; duration?: string }>;
+    education?: Array<{ school: string; degree?: string; field?: string }>;
+    skills?: string[];
+    connections?: number;
+    yearsExperience?: number;
+  }>;
+  // AI-generated summary
+  aiSummary?: {
+    teamStrength: string;
+    marketPosition: string;
+    competitiveAdvantage: string;
+    concerns: string[];
+    highlights: string[];
+    generatedAt: string;
+  };
+  // Score impact from enrichment
+  scoreImpact?: {
+    teamAdjustment: number;
+    marketAdjustment: number;
+    tractionAdjustment: number;
+    signals: Array<{ category: string; signal: string; impact: number }>;
+  };
+  // Enrichment metadata
+  lastEnrichedAt: string;
+  enrichmentStatus: 'pending' | 'in_progress' | 'completed' | 'failed';
+  enrichmentError?: string;
+}
+
+// Helper: Fetch and parse website content
+async function scrapeWebsite(url: string): Promise<EnrichmentData['website'] | null> {
+  try {
+    // Normalize URL
+    let normalizedUrl = url;
+    if (!normalizedUrl.startsWith('http')) {
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+
+    console.log(`[Enrichment] Scraping website: ${normalizedUrl}`);
+
+    const response = await fetch(normalizedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; StartupTracker/1.0; +https://startup-tracker-app.web.app)',
+        'Accept': 'text/html,application/xhtml+xml',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) {
+      console.log(`[Enrichment] Website returned ${response.status}`);
+      return null;
+    }
+
+    const html = await response.text();
+
+    // Use AI to extract structured data from HTML
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const prompt = `Extract company information from this website HTML. Return ONLY a JSON object:
+
+HTML (first 15000 chars):
+${html.substring(0, 15000)}
+
+Return JSON:
+{
+  "title": "company name from title/header",
+  "description": "what the company does (1-2 sentences)",
+  "teamMembers": [{"name": "...", "role": "...", "linkedIn": "url or null"}] (if team page visible),
+  "pricing": "pricing info if visible (free, freemium, paid plans)",
+  "features": ["key feature 1", "key feature 2"] (max 5),
+  "techStack": ["technology mentioned"] (if any dev tools, languages visible)
+}
+
+If information not found, use null. Return ONLY valid JSON.`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    // Clean JSON response
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    return {
+      ...parsed,
+      scrapedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[Enrichment] Website scrape error:', error);
+    return null;
+  }
+}
+
+// Helper: Search Crunchbase API
+async function fetchCrunchbaseData(companyName: string, website?: string): Promise<EnrichmentData['crunchbase'] | null> {
+  try {
+    // Crunchbase API key - you'll need to add this to your environment
+    const CRUNCHBASE_API_KEY = process.env.CRUNCHBASE_API_KEY;
+
+    if (!CRUNCHBASE_API_KEY) {
+      console.log('[Enrichment] No Crunchbase API key configured');
+      // Return mock/simulated data for now - will use AI to estimate
+      return await simulateCrunchbaseWithAI(companyName, website);
+    }
+
+    console.log(`[Enrichment] Fetching Crunchbase data for: ${companyName}`);
+
+    // Search for the company
+    const searchUrl = `https://api.crunchbase.com/api/v4/autocompletes?query=${encodeURIComponent(companyName)}&collection_ids=organizations`;
+    const searchResponse = await fetch(searchUrl, {
+      headers: {
+        'X-cb-user-key': CRUNCHBASE_API_KEY,
+      },
+    });
+
+    if (!searchResponse.ok) {
+      console.log(`[Enrichment] Crunchbase search returned ${searchResponse.status}`);
+      return await simulateCrunchbaseWithAI(companyName, website);
+    }
+
+    const searchData = await searchResponse.json();
+    if (!searchData.entities || searchData.entities.length === 0) {
+      console.log('[Enrichment] No Crunchbase results found');
+      return await simulateCrunchbaseWithAI(companyName, website);
+    }
+
+    // Get the first matching organization
+    const org = searchData.entities[0];
+    const orgId = org.identifier.permalink;
+
+    // Fetch detailed organization data
+    const detailUrl = `https://api.crunchbase.com/api/v4/entities/organizations/${orgId}?card_ids=founders,raised_funding_rounds,investors`;
+    const detailResponse = await fetch(detailUrl, {
+      headers: {
+        'X-cb-user-key': CRUNCHBASE_API_KEY,
+      },
+    });
+
+    if (!detailResponse.ok) {
+      return await simulateCrunchbaseWithAI(companyName, website);
+    }
+
+    const detailData = await detailResponse.json();
+    const props = detailData.properties || {};
+    const cards = detailData.cards || {};
+
+    return {
+      name: props.name,
+      shortDescription: props.short_description,
+      foundedOn: props.founded_on,
+      numEmployeesEnum: props.num_employees_enum,
+      totalFundingUsd: props.total_funding_usd,
+      lastFundingType: props.last_funding_type,
+      lastFundingDate: props.last_funding_at,
+      numFundingRounds: props.num_funding_rounds,
+      investors: cards.investors?.map((i: { identifier: { value: string } }) => i.identifier.value) || [],
+      categories: props.categories?.map((c: { value: string }) => c.value) || [],
+      headquarters: props.headquarters_location?.value,
+      websiteUrl: props.website_url,
+      linkedInUrl: props.linkedin_url,
+      twitterUrl: props.twitter_url,
+      founders: cards.founders?.map((f: { identifier: { value: string }; title?: string; linkedin?: string }) => ({
+        name: f.identifier.value,
+        title: f.title,
+        linkedIn: f.linkedin,
+      })) || [],
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[Enrichment] Crunchbase fetch error:', error);
+    return await simulateCrunchbaseWithAI(companyName, website);
+  }
+}
+
+// Helper: Use AI to estimate Crunchbase-like data when API not available
+async function simulateCrunchbaseWithAI(companyName: string, website?: string): Promise<EnrichmentData['crunchbase'] | null> {
+  try {
+    console.log(`[Enrichment] Using AI to research: ${companyName}`);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `Research the startup "${companyName}"${website ? ` (website: ${website})` : ''} and provide available information.
+
+Return ONLY a JSON object with what you know (use null for unknown fields):
+{
+  "name": "company name",
+  "shortDescription": "what they do",
+  "foundedOn": "YYYY or YYYY-MM-DD if known",
+  "numEmployeesEnum": "1-10, 11-50, 51-100, 101-250, 251-500, 500+",
+  "totalFundingUsd": number or null,
+  "lastFundingType": "seed, series_a, series_b, etc or null",
+  "categories": ["industry category"],
+  "competitors": [{"name": "competitor name", "shortDescription": "what they do"}] (max 3),
+  "marketInsights": "brief market analysis"
+}
+
+Be conservative - only include information you're confident about.`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    return {
+      ...parsed,
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[Enrichment] AI research error:', error);
+    return null;
+  }
+}
+
+// Helper: Fetch Google News
+async function fetchGoogleNews(companyName: string): Promise<EnrichmentData['news'] | null> {
+  try {
+    console.log(`[Enrichment] Fetching news for: ${companyName}`);
+
+    // Use Google Custom Search API or fallback to AI
+    const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+    const GOOGLE_CX = process.env.GOOGLE_SEARCH_CX;
+
+    if (GOOGLE_API_KEY && GOOGLE_CX) {
+      const query = encodeURIComponent(`${companyName} startup funding OR launch OR announcement`);
+      const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&q=${query}&dateRestrict=m6&num=5`;
+
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        const articles = (data.items || []).map((item: { title: string; displayLink: string; link: string; snippet: string }) => ({
+          title: item.title,
+          source: item.displayLink,
+          url: item.link,
+          publishedAt: new Date().toISOString(), // Google doesn't return exact date
+          snippet: item.snippet,
+        }));
+
+        return {
+          articles,
+          fetchedAt: new Date().toISOString(),
+        };
+      }
+    }
+
+    // Fallback: Use AI to provide known news/context
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const prompt = `What recent news or notable events do you know about the startup "${companyName}"?
+
+Return ONLY a JSON array of news items you're aware of (max 3):
+[
+  {
+    "title": "headline",
+    "source": "publication name",
+    "publishedAt": "approximate date YYYY-MM-DD",
+    "snippet": "brief summary"
+  }
+]
+
+If you don't know any specific news, return an empty array [].`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const articles = JSON.parse(jsonStr);
+    return {
+      articles: articles || [],
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[Enrichment] News fetch error:', error);
+    return { articles: [], fetchedAt: new Date().toISOString() };
+  }
+}
+
+// Helper: Fetch LinkedIn company data using AI research
+async function fetchLinkedInCompanyData(
+  companyName: string,
+  website?: string,
+  linkedInUrl?: string
+): Promise<EnrichmentData['linkedin'] | null> {
+  try {
+    console.log(`[Enrichment] Fetching LinkedIn data for: ${companyName}`);
+
+    // Use AI to research LinkedIn company information
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `Research the LinkedIn company profile for "${companyName}"${website ? ` (website: ${website})` : ''}${linkedInUrl ? ` (LinkedIn: ${linkedInUrl})` : ''}.
+
+Based on publicly available information about this company's LinkedIn presence, provide:
+
+Return ONLY a JSON object with this structure:
+{
+  "companyName": "official company name on LinkedIn",
+  "tagline": "company tagline/slogan",
+  "description": "company description/about section (2-3 sentences)",
+  "industry": "primary industry",
+  "companySize": "employee range (e.g., '11-50 employees', '51-200 employees')",
+  "headquarters": "city, country",
+  "foundedYear": "YYYY or null if unknown",
+  "specialties": ["specialty1", "specialty2"],
+  "employeeCount": "approximate number or range",
+  "followerCount": null
+}
+
+Use your knowledge to provide accurate information. If you're uncertain about specific details, use null for those fields.`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    return {
+      ...parsed,
+      companyUrl: linkedInUrl || null,
+      fetchedAt: new Date().toISOString(),
+      source: 'ai_research' as const,
+    };
+  } catch (error) {
+    console.error('[Enrichment] LinkedIn company data error:', error);
+    return null;
+  }
+}
+
+// Helper: Fetch LinkedIn founder/team data using AI research
+async function fetchLinkedInFounderData(
+  companyName: string,
+  founderNames?: string[],
+  founderLinkedIns?: string[]
+): Promise<EnrichmentData['founders'] | null> {
+  try {
+    console.log(`[Enrichment] Fetching LinkedIn founder data for: ${companyName}`);
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const founderContext = founderNames && founderNames.length > 0
+      ? `Known founders: ${founderNames.join(', ')}`
+      : '';
+
+    const linkedInContext = founderLinkedIns && founderLinkedIns.length > 0
+      ? `LinkedIn profiles: ${founderLinkedIns.join(', ')}`
+      : '';
+
+    const prompt = `Research the founders and key executives of "${companyName}".
+${founderContext}
+${linkedInContext}
+
+Based on publicly available LinkedIn information, provide details about the founding team and key executives.
+
+Return ONLY a JSON array with this structure:
+[
+  {
+    "name": "Full Name",
+    "currentRole": "their role at ${companyName}",
+    "headline": "their LinkedIn headline",
+    "location": "city, country",
+    "previousCompanies": [
+      {"name": "Company Name", "role": "Their role", "duration": "e.g., 2 years"}
+    ],
+    "education": [
+      {"school": "University Name", "degree": "Degree Type", "field": "Field of Study"}
+    ],
+    "skills": ["skill1", "skill2", "skill3"],
+    "yearsExperience": 10
+  }
+]
+
+Provide information for up to 3 key founders/executives. Use your knowledge to provide accurate information.
+If you're uncertain about specific details, omit those fields.
+Focus on founders, CEOs, CTOs, and other C-level executives.`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const founders = JSON.parse(jsonStr);
+
+    // Attach LinkedIn URLs if provided
+    if (founderLinkedIns && founders) {
+      founders.forEach((founder: { name: string; linkedInUrl?: string }, idx: number) => {
+        if (founderLinkedIns[idx]) {
+          founder.linkedInUrl = founderLinkedIns[idx];
+        }
+      });
+    }
+
+    return founders && founders.length > 0 ? founders : null;
+  } catch (error) {
+    console.error('[Enrichment] LinkedIn founder data error:', error);
+    return null;
+  }
+}
+
+// Helper: Generate AI summary from all enrichment data
+async function generateEnrichmentSummary(
+  startupData: Record<string, unknown>,
+  enrichmentData: EnrichmentData
+): Promise<EnrichmentData['aiSummary'] | null> {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `Analyze this startup enrichment data and provide an investment-focused summary.
+
+Startup: ${startupData.name}
+Description: ${startupData.description || 'N/A'}
+Stage: ${startupData.stage || 'Unknown'}
+
+Website Data: ${JSON.stringify(enrichmentData.website || {}, null, 2)}
+Market Data: ${JSON.stringify(enrichmentData.crunchbase || {}, null, 2)}
+LinkedIn Company: ${JSON.stringify(enrichmentData.linkedin || {}, null, 2)}
+Founder Profiles: ${JSON.stringify(enrichmentData.founders || [], null, 2)}
+Recent News: ${JSON.stringify(enrichmentData.news?.articles || [], null, 2)}
+
+Return ONLY a JSON object:
+{
+  "teamStrength": "Assessment of team based on available data (1-2 sentences)",
+  "marketPosition": "Market positioning and competitive landscape (1-2 sentences)",
+  "competitiveAdvantage": "What makes them unique (1-2 sentences)",
+  "concerns": ["concern 1", "concern 2"] (investment concerns, max 3),
+  "highlights": ["highlight 1", "highlight 2"] (positive signals, max 3)
+}`;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    let jsonStr = responseText;
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    return {
+      ...parsed,
+      generatedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[Enrichment] Summary generation error:', error);
+    return null;
+  }
+}
+
+// Helper: Calculate enrichment score impact
+function calculateEnrichmentScoreImpact(enrichmentData: EnrichmentData): {
+  teamAdjustment: number;
+  marketAdjustment: number;
+  tractionAdjustment: number;
+  signals: Array<{ category: string; signal: string; impact: number }>;
+} {
+  const signals: Array<{ category: string; signal: string; impact: number }> = [];
+  let teamAdjustment = 0;
+  let marketAdjustment = 0;
+  let tractionAdjustment = 0;
+
+  // Crunchbase signals
+  if (enrichmentData.crunchbase) {
+    const cb = enrichmentData.crunchbase;
+
+    // Funding signals
+    if (cb.totalFundingUsd && cb.totalFundingUsd > 0) {
+      if (cb.totalFundingUsd >= 10000000) {
+        tractionAdjustment += 5;
+        signals.push({ category: 'traction', signal: `Raised $${(cb.totalFundingUsd / 1000000).toFixed(1)}M in funding`, impact: 5 });
+      } else if (cb.totalFundingUsd >= 1000000) {
+        tractionAdjustment += 3;
+        signals.push({ category: 'traction', signal: `Raised $${(cb.totalFundingUsd / 1000000).toFixed(1)}M in funding`, impact: 3 });
+      }
+    }
+
+    // Notable investors
+    if (cb.investors && cb.investors.length > 0) {
+      const notableInvestors = ['Sequoia', 'a16z', 'Andreessen', 'Y Combinator', 'YC', 'Accel', 'Tiger Global', 'Lightspeed', 'Index'];
+      const hasNotable = cb.investors.some(inv => notableInvestors.some(n => inv.toLowerCase().includes(n.toLowerCase())));
+      if (hasNotable) {
+        teamAdjustment += 3;
+        signals.push({ category: 'team', signal: 'Backed by tier-1 investors', impact: 3 });
+      }
+    }
+
+    // Team size
+    if (cb.numEmployeesEnum) {
+      if (cb.numEmployeesEnum.includes('51') || cb.numEmployeesEnum.includes('100')) {
+        tractionAdjustment += 2;
+        signals.push({ category: 'traction', signal: `Team size: ${cb.numEmployeesEnum} employees`, impact: 2 });
+      }
+    }
+
+    // Competitors identified
+    if (cb.competitors && cb.competitors.length > 0) {
+      marketAdjustment += 1;
+      signals.push({ category: 'market', signal: `${cb.competitors.length} competitors identified`, impact: 1 });
+    }
+  }
+
+  // Website signals
+  if (enrichmentData.website) {
+    const web = enrichmentData.website;
+
+    // Team visible
+    if (web.teamMembers && web.teamMembers.length > 0) {
+      teamAdjustment += 1;
+      signals.push({ category: 'team', signal: `${web.teamMembers.length} team members identified`, impact: 1 });
+    }
+
+    // Clear pricing = market validation
+    if (web.pricing && !web.pricing.toLowerCase().includes('contact')) {
+      tractionAdjustment += 1;
+      signals.push({ category: 'traction', signal: 'Public pricing available', impact: 1 });
+    }
+  }
+
+  // News signals
+  if (enrichmentData.news && enrichmentData.news.articles.length > 0) {
+    marketAdjustment += 2;
+    signals.push({ category: 'market', signal: `${enrichmentData.news.articles.length} recent news articles found`, impact: 2 });
+  }
+
+  // LinkedIn company signals
+  if (enrichmentData.linkedin) {
+    const li = enrichmentData.linkedin;
+
+    // Company size from LinkedIn
+    if (li.companySize) {
+      const sizeMatch = li.companySize.match(/(\d+)/);
+      if (sizeMatch) {
+        const size = parseInt(sizeMatch[1]);
+        if (size >= 50) {
+          tractionAdjustment += 2;
+          signals.push({ category: 'traction', signal: `LinkedIn shows ${li.companySize}`, impact: 2 });
+        } else if (size >= 10) {
+          tractionAdjustment += 1;
+          signals.push({ category: 'traction', signal: `LinkedIn shows ${li.companySize}`, impact: 1 });
+        }
+      }
+    }
+
+    // Follower count indicates market presence
+    if (li.followerCount && li.followerCount > 1000) {
+      marketAdjustment += 1;
+      signals.push({ category: 'market', signal: `${li.followerCount.toLocaleString()} LinkedIn followers`, impact: 1 });
+    }
+  }
+
+  // LinkedIn founder signals
+  if (enrichmentData.founders && enrichmentData.founders.length > 0) {
+    const founders = enrichmentData.founders;
+
+    // Strong founder backgrounds
+    const experiencedFounders = founders.filter(f => f.yearsExperience && f.yearsExperience >= 10);
+    if (experiencedFounders.length > 0) {
+      teamAdjustment += 2;
+      signals.push({ category: 'team', signal: `${experiencedFounders.length} founder(s) with 10+ years experience`, impact: 2 });
+    }
+
+    // Notable previous companies
+    const notableCompanies = ['Google', 'Meta', 'Facebook', 'Amazon', 'Apple', 'Microsoft', 'Netflix', 'Uber', 'Airbnb', 'Stripe', 'LinkedIn', 'Twitter', 'Salesforce', 'Oracle', 'McKinsey', 'BCG', 'Bain', 'Goldman', 'Morgan Stanley'];
+    const hasNotableBackground = founders.some(f =>
+      f.previousCompanies?.some(pc =>
+        notableCompanies.some(nc => pc.name.toLowerCase().includes(nc.toLowerCase()))
+      )
+    );
+    if (hasNotableBackground) {
+      teamAdjustment += 3;
+      signals.push({ category: 'team', signal: 'Founder(s) from notable companies', impact: 3 });
+    }
+
+    // Strong education
+    const topSchools = ['Stanford', 'MIT', 'Harvard', 'Berkeley', 'Yale', 'Princeton', 'Wharton', 'Carnegie Mellon', 'Oxford', 'Cambridge', 'IIT', 'INSEAD'];
+    const hasTopEducation = founders.some(f =>
+      f.education?.some(edu =>
+        topSchools.some(school => edu.school.toLowerCase().includes(school.toLowerCase()))
+      )
+    );
+    if (hasTopEducation) {
+      teamAdjustment += 2;
+      signals.push({ category: 'team', signal: 'Founder(s) from top-tier universities', impact: 2 });
+    }
+  }
+
+  return {
+    teamAdjustment,
+    marketAdjustment,
+    tractionAdjustment,
+    signals,
+  };
+}
+
+// Main enrichment function
+async function enrichStartup(startupId: string, startupData: Record<string, unknown>): Promise<EnrichmentData> {
+  console.log(`[Enrichment] Starting enrichment for: ${startupData.name}`);
+
+  const enrichmentData: EnrichmentData = {
+    lastEnrichedAt: new Date().toISOString(),
+    enrichmentStatus: 'in_progress',
+  };
+
+  try {
+    // Extract any known LinkedIn URLs from startup data
+    const linkedInUrl = startupData.linkedInUrl as string | undefined;
+    const founderLinkedIns = startupData.founderLinkedIns as string[] | undefined;
+    const founderNames = startupData.founders as string[] | undefined;
+
+    // Run all enrichment tasks in parallel (Phase 1: Basic data)
+    const [websiteData, crunchbaseData, newsData] = await Promise.all([
+      startupData.website ? scrapeWebsite(startupData.website as string) : Promise.resolve(null),
+      fetchCrunchbaseData(startupData.name as string, startupData.website as string),
+      fetchGoogleNews(startupData.name as string),
+    ]);
+
+    if (websiteData) enrichmentData.website = websiteData;
+    if (crunchbaseData) enrichmentData.crunchbase = crunchbaseData;
+
+    // Phase 2: LinkedIn enrichment (can use data from Phase 1)
+    // Get LinkedIn URL from crunchbase if not provided
+    const effectiveLinkedInUrl = linkedInUrl || crunchbaseData?.linkedInUrl;
+
+    // Get founder names from website scrape if not provided
+    const effectiveFounderNames = founderNames ||
+      websiteData?.teamMembers?.map(m => m.name) ||
+      crunchbaseData?.founders?.map(f => f.name);
+
+    // Run LinkedIn enrichment in parallel
+    const [linkedinCompanyData, linkedinFounderData] = await Promise.all([
+      fetchLinkedInCompanyData(
+        startupData.name as string,
+        startupData.website as string | undefined,
+        effectiveLinkedInUrl
+      ),
+      fetchLinkedInFounderData(
+        startupData.name as string,
+        effectiveFounderNames,
+        founderLinkedIns
+      ),
+    ]);
+
+    if (linkedinCompanyData) enrichmentData.linkedin = linkedinCompanyData;
+    if (linkedinFounderData) enrichmentData.founders = linkedinFounderData;
+    if (newsData) enrichmentData.news = newsData;
+
+    // Generate AI summary
+    const aiSummary = await generateEnrichmentSummary(startupData, enrichmentData);
+    if (aiSummary) enrichmentData.aiSummary = aiSummary;
+
+    // Calculate score impact and save to enrichmentData
+    const scoreImpact = calculateEnrichmentScoreImpact(enrichmentData);
+    enrichmentData.scoreImpact = scoreImpact;
+
+    // Update startup with enrichment data
+    const startupRef = db.collection('startups').doc(startupId);
+
+    const updateData: Record<string, unknown> = {
+      enrichmentData,
+      enrichedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    // Auto-populate fields from enrichment
+    if (crunchbaseData) {
+      if (crunchbaseData.shortDescription && !startupData.description) {
+        updateData.description = crunchbaseData.shortDescription;
+      }
+      if (crunchbaseData.categories && crunchbaseData.categories.length > 0 && !startupData.sector) {
+        // Map categories to our sectors
+        const categoryMap: Record<string, string> = {
+          'fintech': 'fintech',
+          'financial services': 'fintech',
+          'health': 'healthtech',
+          'healthcare': 'healthtech',
+          'edtech': 'edtech',
+          'education': 'edtech',
+          'saas': 'saas',
+          'software': 'saas',
+          'e-commerce': 'ecommerce',
+          'marketplace': 'marketplace',
+          'consumer': 'consumer',
+          'enterprise': 'enterprise',
+          'artificial intelligence': 'deeptech',
+          'machine learning': 'deeptech',
+          'climate': 'climate',
+          'sustainability': 'climate',
+        };
+
+        for (const cat of crunchbaseData.categories) {
+          const lowerCat = cat.toLowerCase();
+          for (const [key, value] of Object.entries(categoryMap)) {
+            if (lowerCat.includes(key)) {
+              updateData.sector = value;
+              break;
+            }
+          }
+          if (updateData.sector) break;
+        }
+      }
+      if (crunchbaseData.founders && crunchbaseData.founders.length > 0 && !startupData.founders) {
+        updateData.founders = crunchbaseData.founders;
+      }
+      if (crunchbaseData.linkedInUrl) {
+        updateData.linkedInUrl = crunchbaseData.linkedInUrl;
+      }
+      if (crunchbaseData.twitterUrl) {
+        updateData.twitterUrl = crunchbaseData.twitterUrl;
+      }
+    }
+
+    // Apply score adjustments
+    if (scoreImpact.signals.length > 0) {
+      // Create score events for enrichment findings
+      const batch = db.batch();
+      for (const signal of scoreImpact.signals) {
+        const eventRef = db.collection('scoreEvents').doc();
+        batch.set(eventRef, {
+          startupId,
+          organizationId: startupData.organizationId,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          source: 'enrichment',
+          category: signal.category,
+          signal: signal.signal,
+          impact: signal.impact,
+          confidence: 0.8,
+          analyzedBy: 'ai',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+
+      // Update score breakdown
+      const currentBreakdown = (startupData.scoreBreakdown as Record<string, { base: number; adjusted: number }>) || {};
+      if (currentBreakdown.team) {
+        currentBreakdown.team.adjusted = (currentBreakdown.team.adjusted || 0) + scoreImpact.teamAdjustment;
+      }
+      if (currentBreakdown.market) {
+        currentBreakdown.market.adjusted = (currentBreakdown.market.adjusted || 0) + scoreImpact.marketAdjustment;
+      }
+      if (currentBreakdown.traction) {
+        currentBreakdown.traction.adjusted = (currentBreakdown.traction.adjusted || 0) + scoreImpact.tractionAdjustment;
+      }
+      updateData.scoreBreakdown = currentBreakdown;
+
+      // Recalculate total score
+      const totalAdjustment = scoreImpact.teamAdjustment + scoreImpact.marketAdjustment + scoreImpact.tractionAdjustment;
+      if (typeof startupData.currentScore === 'number') {
+        updateData.currentScore = Math.min(100, Math.max(0, startupData.currentScore + totalAdjustment));
+      }
+    }
+
+    enrichmentData.enrichmentStatus = 'completed';
+    updateData.enrichmentData = enrichmentData;
+
+    await startupRef.update(updateData);
+
+    console.log(`[Enrichment] Completed enrichment for: ${startupData.name}`);
+    return enrichmentData;
+  } catch (error) {
+    console.error('[Enrichment] Error:', error);
+    enrichmentData.enrichmentStatus = 'failed';
+    enrichmentData.enrichmentError = error instanceof Error ? error.message : 'Unknown error';
+
+    // Save failed status
+    await db.collection('startups').doc(startupId).update({
+      enrichmentData,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return enrichmentData;
+  }
+}
+
+// Endpoint: Trigger enrichment for a startup
+app.post('/startups/:id/enrich', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Mark as in progress
+    await startupRef.update({
+      'enrichmentData.enrichmentStatus': 'in_progress',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Run enrichment (don't await - return immediately)
+    enrichStartup(req.params.id as string, { id: startupDoc.id, ...data })
+      .catch(err => console.error('[Enrichment] Background enrichment failed:', err));
+
+    return res.json({
+      success: true,
+      message: 'Enrichment started. Data will be updated shortly.',
+      status: 'in_progress',
+    });
+  } catch (error) {
+    console.error('Enrich startup error:', error);
+    return res.status(500).json({ error: 'Failed to start enrichment' });
+  }
+});
+
+// Endpoint: Get enrichment data for a startup
+app.get('/startups/:id/enrichment', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupDoc = await db.collection('startups').doc(req.params.id as string).get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const enrichmentData = data.enrichmentData;
+
+    // If no enrichment data, return not_started status
+    if (!enrichmentData) {
+      return res.json({ status: 'not_started' });
+    }
+
+    // Format AI summary as a readable string
+    let aiSummaryText: string | null = null;
+    if (enrichmentData.aiSummary) {
+      const summary = enrichmentData.aiSummary;
+      const parts: string[] = [];
+      if (summary.teamStrength) parts.push(`**Team:** ${summary.teamStrength}`);
+      if (summary.marketPosition) parts.push(`**Market:** ${summary.marketPosition}`);
+      if (summary.competitiveAdvantage) parts.push(`**Advantage:** ${summary.competitiveAdvantage}`);
+      if (summary.highlights && summary.highlights.length > 0) {
+        parts.push(`**Highlights:** ${summary.highlights.join(', ')}`);
+      }
+      if (summary.concerns && summary.concerns.length > 0) {
+        parts.push(`**Concerns:** ${summary.concerns.join(', ')}`);
+      }
+      aiSummaryText = parts.join('\n\n');
+    }
+
+    // Format website data for frontend
+    let websiteData = null;
+    if (enrichmentData.website) {
+      const web = enrichmentData.website;
+      websiteData = {
+        companyName: web.title || null,
+        description: web.description || null,
+        sector: null, // Not directly available from scrape
+        productOffering: web.features?.join(', ') || null,
+        targetMarket: null,
+        teamSize: web.teamMembers?.length ? `${web.teamMembers.length}+ team members` : null,
+        foundedYear: null,
+        founders: web.teamMembers?.map((m: { name: string; role: string; linkedIn?: string }) => ({ name: m.name, role: m.role, linkedin: m.linkedIn })) || null,
+        linkedinUrl: null,
+        twitterUrl: null,
+        techStack: web.techStack || null,
+      };
+    }
+
+    // Format crunchbase data for frontend
+    let crunchbaseData = null;
+    if (enrichmentData.crunchbase) {
+      const cb = enrichmentData.crunchbase;
+      crunchbaseData = {
+        shortDescription: cb.shortDescription || null,
+        totalFundingUsd: cb.totalFundingUsd || null,
+        lastFundingType: cb.lastFundingType || null,
+        numEmployeesEnum: cb.numEmployeesEnum || null,
+        foundedOn: cb.foundedOn || null,
+        categories: cb.categories || null,
+        investors: cb.investors || null,
+        source: cb.source || 'crunchbase',
+      };
+    }
+
+    // Format news articles for frontend
+    let newsArticles = null;
+    if (enrichmentData.news?.articles) {
+      newsArticles = enrichmentData.news.articles;
+    }
+
+    // Format score impact for frontend (map from backend structure)
+    let scoreImpact = null;
+    if (enrichmentData.scoreImpact) {
+      const si = enrichmentData.scoreImpact;
+      scoreImpact = {
+        team: si.team || si.teamAdjustment || 0,
+        market: si.market || si.marketAdjustment || 0,
+        traction: si.traction || si.tractionAdjustment || 0,
+        product: si.product || 0,
+      };
+    }
+
+    // Format LinkedIn company data for frontend
+    let linkedinData = null;
+    if (enrichmentData.linkedin) {
+      const li = enrichmentData.linkedin;
+      linkedinData = {
+        companyName: li.companyName || null,
+        tagline: li.tagline || null,
+        description: li.description || null,
+        industry: li.industry || null,
+        companySize: li.companySize || null,
+        headquarters: li.headquarters || null,
+        foundedYear: li.foundedYear || null,
+        specialties: li.specialties || null,
+        employeeCount: li.employeeCount || null,
+        followerCount: li.followerCount || null,
+        companyUrl: li.companyUrl || null,
+        source: li.source || 'ai_research',
+      };
+    }
+
+    // Format founders data for frontend
+    let foundersData = null;
+    if (enrichmentData.founders && enrichmentData.founders.length > 0) {
+      foundersData = enrichmentData.founders.map((f: NonNullable<EnrichmentData['founders']>[number]) => ({
+        name: f.name,
+        linkedInUrl: f.linkedInUrl || null,
+        currentRole: f.currentRole || null,
+        headline: f.headline || null,
+        location: f.location || null,
+        previousCompanies: f.previousCompanies || null,
+        education: f.education || null,
+        skills: f.skills || null,
+        yearsExperience: f.yearsExperience || null,
+      }));
+    }
+
+    // Map backend structure to frontend expected format
+    return res.json({
+      status: enrichmentData.enrichmentStatus || 'not_started',
+      aiSummary: aiSummaryText,
+      websiteData,
+      crunchbaseData,
+      linkedinData,
+      foundersData,
+      newsArticles,
+      scoreImpact,
+      enrichedAt: enrichmentData.lastEnrichedAt || data.enrichedAt?.toDate?.()?.toISOString() || null,
+      error: enrichmentData.enrichmentError || null,
+    });
+  } catch (error) {
+    console.error('Get enrichment error:', error);
+    return res.status(500).json({ error: 'Failed to get enrichment data' });
+  }
+});
+
+// Get pending reminders (for snoozed deals follow-up)
+app.get('/reminders', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const now = new Date();
+    const remindersSnapshot = await db.collection('reminders')
+      .where('organizationId', '==', req.user!.organizationId)
+      .where('status', '==', 'pending')
+      .where('dueDate', '<=', now)
+      .orderBy('dueDate', 'asc')
+      .limit(50)
+      .get();
+
+    const reminders = remindersSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      dueDate: doc.data().dueDate?.toDate?.() || doc.data().dueDate,
+    }));
+
+    return res.json({ reminders });
+  } catch (error) {
+    console.error('Get reminders error:', error);
+    return res.status(500).json({ error: 'Failed to get reminders' });
+  }
+});
+
+// Dismiss a reminder
+app.post('/reminders/:id/dismiss', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const reminderRef = db.collection('reminders').doc(req.params.id as string);
+    const reminderDoc = await reminderRef.get();
+
+    if (!reminderDoc.exists) {
+      return res.status(404).json({ error: 'Reminder not found' });
+    }
+
+    const data = reminderDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Reminder not found' });
+    }
+
+    await reminderRef.update({
+      status: 'dismissed',
+      dismissedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Dismiss reminder error:', error);
+    return res.status(500).json({ error: 'Failed to dismiss reminder' });
+  }
+});
+
+// Record founder update for snoozed startup
+app.post('/startups/:id/founder-update', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { updateContent, source } = req.body;
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Add founder update
+    const updateRef = db.collection('founderUpdates').doc();
+    await updateRef.set({
+      startupId: req.params.id,
+      organizationId: req.user!.organizationId,
+      content: updateContent,
+      source: source || 'manual',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewed: false,
+    });
+
+    // Create an alert for review
+    await db.collection('alerts').add({
+      organizationId: req.user!.organizationId,
+      startupId: req.params.id,
+      startupName: data.name,
+      type: 'founder_update',
+      message: `New update from ${data.founderName || 'founder'} for ${data.name}`,
+      updateId: updateRef.id,
+      status: 'unread',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      updateId: updateRef.id,
+      message: 'Founder update recorded and alert created',
+    });
+  } catch (error) {
+    console.error('Record founder update error:', error);
+    return res.status(500).json({ error: 'Failed to record founder update' });
+  }
+});
+
+// Get alerts for the organization
+app.get('/alerts', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const alertsSnapshot = await db.collection('alerts')
+      .where('organizationId', '==', req.user!.organizationId)
+      .where('status', '==', 'unread')
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+
+    const alerts = alertsSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+    }));
+
+    return res.json({ alerts });
+  } catch (error) {
+    console.error('Get alerts error:', error);
+    return res.status(500).json({ error: 'Failed to get alerts' });
+  }
+});
+
+// Mark alert as read
+app.post('/alerts/:id/read', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const alertRef = db.collection('alerts').doc(req.params.id as string);
+    const alertDoc = await alertRef.get();
+
+    if (!alertDoc.exists) {
+      return res.status(404).json({ error: 'Alert not found' });
+    }
+
+    const data = alertDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Alert not found' });
+    }
+
+    await alertRef.update({
+      status: 'read',
+      readAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Mark alert as read error:', error);
+    return res.status(500).json({ error: 'Failed to mark alert as read' });
   }
 });
 
@@ -713,6 +2467,83 @@ async function getInboxConfig(organizationId: string): Promise<{host: string; po
   return null;
 }
 
+// Helper function to send email via SMTP
+async function sendEmailViaSMTP(config: {host: string; port: number; user: string; password: string; tls: boolean}, options: {
+  from: string;
+  fromName?: string;
+  to: string;
+  subject: string;
+  body: string;
+  replyTo?: string;
+}): Promise<{success: boolean; messageId?: string; error?: string}> {
+  try {
+    // For most email providers, SMTP port is typically:
+    // - 587 for STARTTLS (submission)
+    // - 465 for SSL/TLS (legacy but still used)
+    // - 25 for unencrypted (rarely used now)
+    // The IMAP host usually works for SMTP too (e.g., imap.gmail.com -> smtp.gmail.com)
+
+    // Derive SMTP host from IMAP host if needed
+    let smtpHost = config.host;
+    if (smtpHost.startsWith('imap.')) {
+      smtpHost = smtpHost.replace('imap.', 'smtp.');
+    }
+
+    // Use standard SMTP ports based on security
+    const smtpPort = 587; // STARTTLS is most widely supported
+
+    console.log(`[SMTP] Creating transporter for ${smtpHost}:${smtpPort}`);
+
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: false, // Use STARTTLS (upgrade connection)
+      auth: {
+        user: config.user,
+        pass: config.password,
+      },
+      tls: {
+        rejectUnauthorized: false, // Accept self-signed certificates
+      },
+    });
+
+    // Verify the connection
+    console.log(`[SMTP] Verifying connection...`);
+    await transporter.verify();
+    console.log(`[SMTP] Connection verified successfully`);
+
+    // Format the "from" field with name if provided
+    const fromField = options.fromName
+      ? `"${options.fromName}" <${options.from}>`
+      : options.from;
+
+    // Send the email
+    console.log(`[SMTP] Sending email to ${options.to}...`);
+    const info = await transporter.sendMail({
+      from: fromField,
+      to: options.to,
+      subject: options.subject,
+      text: options.body,
+      html: options.body.replace(/\n/g, '<br>'), // Simple HTML conversion
+      replyTo: options.replyTo || options.from,
+    });
+
+    console.log(`[SMTP] Email sent successfully! MessageId: ${info.messageId}`);
+
+    return {
+      success: true,
+      messageId: info.messageId,
+    };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown SMTP error';
+    console.error(`[SMTP] Error sending email:`, error);
+    return {
+      success: false,
+      error: errorMessage,
+    };
+  }
+}
+
 // Sync inbox - connects to IMAP and fetches emails
 app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -754,10 +2585,13 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
       from: string;
       date: Date;
       status: string;
+      attachments?: number;
+      startupName?: string;
     }> = [];
     let queued = 0;
     let processed = 0;
     let skipped = 0;
+    let decksProcessed = 0;
 
     try {
       await client.connect();
@@ -788,13 +2622,111 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
             const fromName = fromAddress?.name || '';
             const subject = parsed.subject || 'No Subject';
 
-            // Check if already processed
+            // Debug: Log every email being processed
+            console.log(`[EmailSync] Processing email from: ${fromEmail}, subject: ${subject}`);
+
+            // Debug: Log attachment info for ALL emails (before filtering)
+            if (parsed.attachments && parsed.attachments.length > 0) {
+              console.log(`[EmailSync] EMAIL HAS ATTACHMENTS: ${subject}`);
+              console.log(`[EmailSync] Attachment count: ${parsed.attachments.length}`);
+              parsed.attachments.forEach((att, i) => {
+                console.log(`[EmailSync] Att[${i}]: ${att.filename} (${att.contentType}, ${att.size} bytes)`);
+              });
+            }
+
+            // Check if already processed in proposal queue
             const existingSnapshot = await db.collection('proposalQueue')
               .where('emailMessageId', '==', messageId)
               .get();
 
             if (!existingSnapshot.empty) {
               skipped++;
+              continue;
+            }
+
+            // Check if already processed in emails collection
+            const existingEmailSnapshot = await db.collection('emails')
+              .where('messageId', '==', messageId)
+              .get();
+
+            if (!existingEmailSnapshot.empty) {
+              skipped++;
+              continue;
+            }
+
+            // Check if this email is from a known startup founder (reply to our outreach)
+            // First try exact match
+            let startupByFounderEmail = await db.collection('startups')
+              .where('organizationId', '==', req.user!.organizationId)
+              .where('founderEmail', '==', fromEmail)
+              .limit(1)
+              .get();
+
+            // If no exact match, try case-insensitive match
+            if (startupByFounderEmail.empty) {
+              const allStartups = await db.collection('startups')
+                .where('organizationId', '==', req.user!.organizationId)
+                .get();
+
+              const fromEmailLower = fromEmail.toLowerCase();
+              const matchingStartup = allStartups.docs.find(doc => {
+                const founderEmail = doc.data().founderEmail;
+                return founderEmail && founderEmail.toLowerCase() === fromEmailLower;
+              });
+
+              if (matchingStartup) {
+                // Create a fake QuerySnapshot-like object
+                startupByFounderEmail = {
+                  empty: false,
+                  docs: [matchingStartup],
+                } as typeof startupByFounderEmail;
+                console.log(`[EmailSync] Case-insensitive match found for ${fromEmail}`);
+              }
+            }
+
+            if (!startupByFounderEmail.empty) {
+              // This is a reply from a founder we're already tracking!
+              const startupDoc = startupByFounderEmail.docs[0];
+              const startupData = startupDoc.data();
+
+              console.log(`[EmailSync] Found reply from founder: ${fromEmail} for startup: ${startupData.name}`);
+
+              // Store the email linked to this startup
+              const emailRef = db.collection('emails').doc();
+              await emailRef.set({
+                startupId: startupDoc.id,
+                organizationId: req.user!.organizationId,
+                subject,
+                from: fromEmail,
+                fromName: fromName || startupData.founderName,
+                to: config.user,
+                body: parsed.text || parsed.html || '',
+                date: parsed.date || new Date(),
+                direction: 'inbound',
+                isRead: false,
+                labels: ['reply', 'founder-response'],
+                messageId,
+                hasAttachments: (parsed.attachments?.length || 0) > 0,
+                attachmentCount: parsed.attachments?.length || 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+
+              // Update startup's last contact date
+              await startupDoc.ref.update({
+                lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+
+              console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}`);
+              processed++;
+              results.push({
+                messageId,
+                subject,
+                from: `${fromName} <${fromEmail}>`,
+                date: parsed.date || new Date(),
+                status: 'linked_to_startup',
+                startupName: startupData.name,
+              });
               continue;
             }
 
@@ -807,7 +2739,81 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
             if (aiResult && aiResult.isStartupProposal && aiResult.confidence >= 60) {
               const startupName = aiResult.startupName || subject.replace(/^(Re:|Fwd:|FW:)\s*/gi, '').trim().substring(0, 100) || 'Unknown Startup';
 
-              // Add to proposal queue
+              // Extract and store attachments (PDFs, docs, etc.)
+              const attachmentData: Array<{
+                fileName: string;
+                mimeType: string;
+                size: number;
+                storagePath?: string;
+                storageUrl?: string;
+              }> = [];
+
+              // Debug: Log raw attachment info
+              console.log(`[EmailSync] Checking attachments for: ${subject}`);
+              console.log(`[EmailSync] parsed.attachments exists: ${!!parsed.attachments}, count: ${parsed.attachments?.length || 0}`);
+
+              if (parsed.attachments && parsed.attachments.length > 0) {
+                console.log(`[EmailSync] Found ${parsed.attachments.length} attachments in email: ${subject}`);
+                parsed.attachments.forEach((att, i) => {
+                  console.log(`[EmailSync] Attachment ${i}: filename=${att.filename}, contentType=${att.contentType}, size=${att.size}`);
+                });
+
+                for (const attachment of parsed.attachments) {
+                  // Only process relevant file types (PDFs, docs, presentations)
+                  const relevantMimeTypes = [
+                    'application/pdf',
+                    'application/vnd.ms-powerpoint',
+                    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                    'application/msword',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                  ];
+
+                  const fileName = attachment.filename || 'attachment';
+                  const isPDF = fileName.toLowerCase().endsWith('.pdf');
+                  const isPPT = fileName.toLowerCase().endsWith('.ppt') || fileName.toLowerCase().endsWith('.pptx');
+                  const isDOC = fileName.toLowerCase().endsWith('.doc') || fileName.toLowerCase().endsWith('.docx');
+
+                  if (relevantMimeTypes.includes(attachment.contentType) || isPDF || isPPT || isDOC) {
+                    try {
+                      // Store attachment in Firebase Storage
+                      const bucket = admin.storage().bucket();
+                      const storagePath = `attachments/${req.user!.organizationId}/${messageId}/${Date.now()}-${fileName}`;
+                      const file = bucket.file(storagePath);
+
+                      await file.save(attachment.content, {
+                        metadata: {
+                          contentType: attachment.contentType,
+                          metadata: {
+                            originalName: fileName,
+                            emailMessageId: messageId,
+                          },
+                        },
+                      });
+
+                      // Get signed URL
+                      const [signedUrl] = await file.getSignedUrl({
+                        action: 'read',
+                        expires: '2030-01-01',
+                      });
+
+                      attachmentData.push({
+                        fileName,
+                        mimeType: attachment.contentType,
+                        size: attachment.size || attachment.content.length,
+                        storagePath,
+                        storageUrl: signedUrl,
+                      });
+
+                      decksProcessed++;
+                      console.log(`[EmailSync] Stored attachment: ${fileName} (${attachment.contentType})`);
+                    } catch (attachmentError) {
+                      console.error(`[EmailSync] Failed to store attachment ${fileName}:`, attachmentError);
+                    }
+                  }
+                }
+              }
+
+              // Add to proposal queue with attachment data
               await db.collection('proposalQueue').add({
                 organizationId: req.user!.organizationId,
                 userId: req.user!.userId,
@@ -827,6 +2833,8 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 confidence: aiResult.confidence / 100,
                 aiReason: aiResult.reason || 'AI analysis',
                 status: 'pending',
+                attachments: attachmentData.length > 0 ? attachmentData : null,
+                hasAttachments: attachmentData.length > 0,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
               });
 
@@ -836,9 +2844,10 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 subject,
                 from: `${fromName} <${fromEmail}>`,
                 date: parsed.date || new Date(),
-                status: 'queued'
+                status: 'queued',
+                attachments: attachmentData.length,
               });
-              console.log(`[EmailSync] AI identified startup proposal: ${startupName} (${aiResult.confidence}% confidence)`);
+              console.log(`[EmailSync] AI identified startup proposal: ${startupName} (${aiResult.confidence}% confidence) with ${attachmentData.length} attachments`);
             } else {
               skipped++;
               if (aiResult) {
@@ -867,12 +2876,12 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
       created: 0,
       skipped,
       failed: 0,
-      decksProcessed: 0,
+      decksProcessed,
       emailsLinked: 0,
       queued,
       quotaExceeded: false,
       message: queued > 0
-        ? `Found ${queued} potential startup proposals to review!`
+        ? `Found ${queued} potential startup proposals to review!${decksProcessed > 0 ? ` (${decksProcessed} attachments saved)` : ''}`
         : 'No new startup proposals found in your inbox.',
       results
     });
@@ -997,6 +3006,22 @@ app.post('/inbox/parse', authenticate, async (req: AuthRequest, res) => {
 
 app.get('/inbox/queue', authenticate, async (req: AuthRequest, res) => {
   try {
+    // Get existing startups to filter out duplicates
+    const startupsSnapshot = await db.collection('startups')
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    const existingEmails = new Set<string>();
+    const existingNames = new Set<string>();
+    startupsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.founderEmail) existingEmails.add(data.founderEmail.toLowerCase());
+      if (data.name) {
+        const normalizedName = data.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normalizedName.length > 3) existingNames.add(normalizedName);
+      }
+    });
+
     const snapshot = await db.collection('proposalQueue')
       .where('organizationId', '==', req.user!.organizationId)
       .get();
@@ -1034,22 +3059,34 @@ app.get('/inbox/queue', authenticate, async (req: AuthRequest, res) => {
     });
 
     // Deduplicate proposals by founderEmail - keep the most recent one
+    // Also filter out proposals for startups that already exist
     const seenEmails = new Set<string>();
     const seenNames = new Set<string>();
     proposals = proposals.filter((p: any) => {
       const normalizedName = p.startupName?.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const founderEmailLower = p.founderEmail?.toLowerCase();
 
-      // Skip if we've seen this founder email
-      if (p.founderEmail && seenEmails.has(p.founderEmail)) {
+      // Skip if startup already exists with this founder email
+      if (founderEmailLower && existingEmails.has(founderEmailLower)) {
         return false;
       }
 
-      // Skip if we've seen a very similar startup name
+      // Skip if startup already exists with similar name
+      if (normalizedName && normalizedName.length > 3 && existingNames.has(normalizedName)) {
+        return false;
+      }
+
+      // Skip if we've seen this founder email in the queue
+      if (founderEmailLower && seenEmails.has(founderEmailLower)) {
+        return false;
+      }
+
+      // Skip if we've seen a very similar startup name in the queue
       if (normalizedName && normalizedName.length > 3 && seenNames.has(normalizedName)) {
         return false;
       }
 
-      if (p.founderEmail) seenEmails.add(p.founderEmail);
+      if (founderEmailLower) seenEmails.add(founderEmailLower);
       if (normalizedName && normalizedName.length > 3) seenNames.add(normalizedName);
       return true;
     });
@@ -1071,6 +3108,15 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
     }
 
     const proposalData = proposalDoc.data()!;
+
+    // Log attachment data for debugging
+    console.log(`[Approve] Proposal ${req.params.id} for ${proposalData.startupName}`);
+    console.log(`[Approve] hasAttachments: ${proposalData.hasAttachments}, attachments count: ${proposalData.attachments?.length || 0}`);
+    if (proposalData.attachments && proposalData.attachments.length > 0) {
+      proposalData.attachments.forEach((att: { fileName: string; storagePath?: string; storageUrl?: string }, i: number) => {
+        console.log(`[Approve] Attachment ${i + 1}: ${att.fileName}, storagePath: ${att.storagePath ? 'yes' : 'no'}, storageUrl: ${att.storageUrl ? 'yes' : 'no'}`);
+      });
+    }
 
     // Check for existing startup with same founder email to prevent duplicates
     const existingByEmail = await db.collection('startups')
@@ -1100,6 +3146,27 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
         messageId: proposalData.messageId || `proposal-${req.params.id}`,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+
+      // If proposal has attachments, create deck records for them
+      if (proposalData.attachments && proposalData.attachments.length > 0) {
+        for (const attachment of proposalData.attachments) {
+          const deckRef = db.collection('decks').doc();
+          await deckRef.set({
+            startupId: existingStartup.id,
+            organizationId: req.user!.organizationId,
+            fileName: attachment.fileName,
+            fileSize: attachment.size,
+            fileUrl: attachment.storageUrl,
+            storagePath: attachment.storagePath,
+            mimeType: attachment.mimeType,
+            source: 'email_attachment',
+            emailMessageId: proposalData.emailMessageId,
+            status: 'uploaded',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          console.log(`[Approve] Created deck record for attachment: ${attachment.fileName}`);
+        }
+      }
 
       await proposalRef.update({ status: 'approved', linkedStartupId: existingStartup.id, emailId: emailRef.id });
       return res.json({
@@ -1145,6 +3212,27 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
+        // If proposal has attachments, create deck records for them
+        if (proposalData.attachments && proposalData.attachments.length > 0) {
+          for (const attachment of proposalData.attachments) {
+            const deckRef = db.collection('decks').doc();
+            await deckRef.set({
+              startupId: duplicate.id,
+              organizationId: req.user!.organizationId,
+              fileName: attachment.fileName,
+              fileSize: attachment.size,
+              fileUrl: attachment.storageUrl,
+              storagePath: attachment.storagePath,
+              mimeType: attachment.mimeType,
+              source: 'email_attachment',
+              emailMessageId: proposalData.emailMessageId,
+              status: 'uploaded',
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log(`[Approve] Created deck record for attachment: ${attachment.fileName}`);
+          }
+        }
+
         await proposalRef.update({ status: 'approved', linkedStartupId: duplicate.id, emailId: emailRef.id });
         return res.json({
           success: true,
@@ -1155,7 +3243,37 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       }
     }
 
-    // Run AI analysis on the proposal
+    // Analyze attachments with AI first (before email analysis for questions)
+    let attachmentAnalyses: Array<{
+      fileName: string;
+      score: number;
+      summary: string;
+      strengths: string[];
+      weaknesses: string[];
+      keyMetrics: Record<string, string | null>;
+    }> = [];
+
+    if (proposalData.attachments && proposalData.attachments.length > 0) {
+      console.log(`[Approve] Analyzing ${proposalData.attachments.length} attachments for ${proposalData.startupName}...`);
+
+      for (const attachment of proposalData.attachments) {
+        try {
+          // Analyze the attachment with AI
+          const analysis = await analyzeAttachmentWithAI(attachment.fileName, attachment.mimeType, proposalData.startupName);
+          if (analysis) {
+            attachmentAnalyses.push({
+              fileName: attachment.fileName,
+              ...analysis
+            });
+            console.log(`[Approve] Attachment analysis for ${attachment.fileName}: score ${analysis.score}`);
+          }
+        } catch (attachErr) {
+          console.error(`[Approve] Error analyzing attachment ${attachment.fileName}:`, attachErr);
+        }
+      }
+    }
+
+    // Run AI analysis on the proposal, including attachment insights
     console.log(`[Approve] Running AI analysis for ${proposalData.startupName}...`);
     const aiAnalysis = await analyzeStartupWithAI({
       name: proposalData.startupName,
@@ -1166,35 +3284,218 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       emailContent: proposalData.emailPreview,
     });
 
+    // Calculate combined score if we have attachment analyses
+    let combinedScore = aiAnalysis?.currentScore || 50;
+    if (attachmentAnalyses.length > 0) {
+      const avgAttachmentScore = attachmentAnalyses.reduce((sum, a) => sum + a.score, 0) / attachmentAnalyses.length;
+      // Weight: 60% email analysis, 40% attachment analysis
+      combinedScore = Math.round((combinedScore * 0.6) + (avgAttachmentScore * 0.4));
+      console.log(`[Approve] Combined score: ${combinedScore} (email: ${aiAnalysis?.currentScore}, attachments avg: ${avgAttachmentScore})`);
+    }
+
     // Create startup from proposal with AI analysis
     const startupRef = db.collection('startups').doc();
     const startupData: Record<string, unknown> = {
-      name: proposalData.startupName,
-      description: proposalData.description,
-      website: proposalData.website,
-      founderEmail: proposalData.founderEmail,
-      founderName: proposalData.founderName,
+      name: proposalData.startupName || 'Unknown Startup',
+      description: proposalData.description || null,
+      website: proposalData.website || null,
+      founderEmail: proposalData.founderEmail || null,
+      founderName: proposalData.founderName || null,
       stage: proposalData.stage || 'seed',
       status: 'reviewing',
       organizationId: req.user!.organizationId,
+      hasAttachments: proposalData.hasAttachments || false,
+      attachmentCount: proposalData.attachments?.length || 0,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
     // Add AI analysis results if available
     if (aiAnalysis) {
-      startupData.currentScore = aiAnalysis.currentScore;
-      startupData.baseScore = aiAnalysis.currentScore;
+      startupData.currentScore = combinedScore;
+      startupData.baseScore = combinedScore;
+      startupData.emailScore = aiAnalysis.currentScore;
       startupData.scoreBreakdown = aiAnalysis.scoreBreakdown;
       startupData.businessModelAnalysis = aiAnalysis.businessModelAnalysis;
       startupData.sector = aiAnalysis.businessModelAnalysis?.sector;
-      startupData.draftReply = aiAnalysis.draftReply;
       startupData.draftReplyStatus = 'pending';
       startupData.scoreUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
-      console.log(`[Approve] AI analysis complete. Score: ${aiAnalysis.currentScore}`);
+
+      // Add attachment analysis insights to key questions
+      if (attachmentAnalyses.length > 0) {
+        // Update draft reply to include attachment-informed questions
+        const draftReplyWithAttachmentContext = generateDraftReplyWithAttachments(
+          aiAnalysis.draftReply,
+          attachmentAnalyses,
+          proposalData.startupName,
+          proposalData.founderName
+        );
+        startupData.draftReply = draftReplyWithAttachmentContext;
+
+        // Store attachment analyses
+        startupData.attachmentAnalyses = attachmentAnalyses;
+      } else {
+        startupData.draftReply = aiAnalysis.draftReply;
+      }
+
+      console.log(`[Approve] AI analysis complete. Combined Score: ${combinedScore}`);
     }
 
     await startupRef.set(startupData);
+
+    // Create score events if AI analysis was performed
+    if (aiAnalysis) {
+      const scoreEvents: Array<{category: string; signal: string; impact: number; evidence: string}> = [];
+
+      // Add initial proposal event
+      scoreEvents.push({
+        category: 'deal',
+        signal: 'Startup proposal received',
+        impact: 0,
+        evidence: `Received pitch from ${proposalData.founderName || 'founder'} via email`,
+      });
+
+      // Add score breakdown events
+      if (aiAnalysis.scoreBreakdown) {
+        const breakdown = aiAnalysis.scoreBreakdown;
+        if (breakdown.team?.base >= 7) {
+          scoreEvents.push({
+            category: 'team',
+            signal: 'Strong team signal',
+            impact: 5,
+            evidence: `Team score: ${breakdown.team.base}/10`,
+          });
+        }
+        if (breakdown.market?.base >= 7) {
+          scoreEvents.push({
+            category: 'market',
+            signal: 'Attractive market',
+            impact: 5,
+            evidence: `Market score: ${breakdown.market.base}/10`,
+          });
+        }
+        if (breakdown.product?.base >= 7) {
+          scoreEvents.push({
+            category: 'product',
+            signal: 'Strong product/tech',
+            impact: 5,
+            evidence: `Product score: ${breakdown.product.base}/10`,
+          });
+        }
+        if (breakdown.traction?.base >= 7) {
+          scoreEvents.push({
+            category: 'traction',
+            signal: 'Good traction signals',
+            impact: 5,
+            evidence: `Traction score: ${breakdown.traction.base}/10`,
+          });
+        }
+        if (breakdown.redFlags && breakdown.redFlags < -3) {
+          scoreEvents.push({
+            category: 'deal',
+            signal: 'Red flags detected',
+            impact: breakdown.redFlags,
+            evidence: 'AI detected potential concerns in the pitch',
+          });
+        }
+      }
+
+      // Add business model event
+      if (aiAnalysis.businessModelAnalysis) {
+        const bma = aiAnalysis.businessModelAnalysis;
+        scoreEvents.push({
+          category: 'product',
+          signal: 'Business model identified',
+          impact: 2,
+          evidence: `${bma.businessModel?.type || 'Unknown'} model in ${bma.sector || 'Unknown'} sector`,
+        });
+      }
+
+      // Add attachment analysis events
+      for (const attachmentAnalysis of attachmentAnalyses) {
+        if (attachmentAnalysis.score >= 70) {
+          scoreEvents.push({
+            category: 'product',
+            signal: 'Strong pitch deck',
+            impact: 5,
+            evidence: `Deck analysis score: ${attachmentAnalysis.score}/100. ${attachmentAnalysis.summary || ''}`,
+          });
+        } else if (attachmentAnalysis.score >= 50) {
+          scoreEvents.push({
+            category: 'product',
+            signal: 'Pitch deck analyzed',
+            impact: 2,
+            evidence: `Deck analysis score: ${attachmentAnalysis.score}/100. ${attachmentAnalysis.summary || ''}`,
+          });
+        }
+      }
+
+      // Create all score events
+      for (const event of scoreEvents) {
+        await db.collection('scoreEvents').add({
+          startupId: startupRef.id,
+          organizationId: req.user!.organizationId,
+          ...event,
+          source: 'proposal_approval',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      console.log(`[Approve] Created ${scoreEvents.length} score events`);
+    }
+
+    // Create deck records from attachments
+    if (proposalData.attachments && proposalData.attachments.length > 0) {
+      console.log(`[Approve] Creating ${proposalData.attachments.length} deck records...`);
+      for (let i = 0; i < proposalData.attachments.length; i++) {
+        const attachment = proposalData.attachments[i];
+        const analysis = attachmentAnalyses[i] || null;
+
+        // Generate a fresh signed URL if storagePath exists
+        let fileUrl = attachment.storageUrl;
+        if (attachment.storagePath) {
+          try {
+            const bucket = admin.storage().bucket();
+            const file = bucket.file(attachment.storagePath);
+            const [exists] = await file.exists();
+            if (exists) {
+              // Use public URL format which doesn't expire
+              const bucketName = bucket.name;
+              fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(attachment.storagePath)}?alt=media`;
+              console.log(`[Approve] Generated fresh URL for: ${attachment.fileName}`);
+            } else {
+              console.log(`[Approve] File not found in storage: ${attachment.storagePath}`);
+            }
+          } catch (urlError) {
+            console.error(`[Approve] Failed to generate URL for ${attachment.fileName}:`, urlError);
+          }
+        }
+
+        const deckRef = db.collection('decks').doc();
+        await deckRef.set({
+          startupId: startupRef.id,
+          organizationId: req.user!.organizationId,
+          fileName: attachment.fileName,
+          fileSize: attachment.size,
+          fileUrl: fileUrl,
+          storagePath: attachment.storagePath,
+          mimeType: attachment.mimeType,
+          source: 'email_attachment',
+          emailMessageId: proposalData.emailMessageId,
+          aiAnalysis: analysis ? {
+            score: analysis.score,
+            summary: analysis.summary,
+            strengths: analysis.strengths,
+            weaknesses: analysis.weaknesses,
+            keyMetrics: analysis.keyMetrics,
+          } : null,
+          status: analysis ? 'processed' : 'uploaded',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`[Approve] Created deck record for: ${attachment.fileName}`);
+      }
+    } else {
+      console.log(`[Approve] No attachments found in proposal data`);
+    }
 
     // Create email record from the proposal
     const emailRef = db.collection('emails').doc();
@@ -1211,13 +3512,33 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       isRead: true,
       labels: ['proposal'],
       messageId: proposalData.messageId || `proposal-${req.params.id}`,
+      hasAttachments: proposalData.hasAttachments || false,
+      attachmentCount: proposalData.attachments?.length || 0,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     // Update proposal status
     await proposalRef.update({ status: 'approved', linkedStartupId: startupRef.id, emailId: emailRef.id });
 
-    return res.json({ success: true, startupId: startupRef.id, score: aiAnalysis?.currentScore });
+    // Auto-trigger enrichment in background
+    console.log(`[Approve] Starting auto-enrichment for ${proposalData.startupName}...`);
+    enrichStartup(startupRef.id, {
+      id: startupRef.id,
+      name: proposalData.startupName,
+      website: proposalData.website || proposalData.extractedDomain,
+      description: proposalData.description,
+      stage: proposalData.stage,
+      organizationId: req.user!.organizationId,
+      currentScore: combinedScore,
+      scoreBreakdown: aiAnalysis?.scoreBreakdown,
+    }).catch(err => console.error('[Approve] Auto-enrichment failed:', err));
+
+    return res.json({
+      success: true,
+      startupId: startupRef.id,
+      score: combinedScore,
+      attachmentsProcessed: proposalData.attachments?.length || 0,
+    });
   } catch (error) {
     console.error('Approve proposal error:', error);
     return res.status(500).json({ error: 'Failed to approve proposal' });
@@ -1335,7 +3656,22 @@ app.get('/emails/startup/:startupId', authenticate, async (req: AuthRequest, res
 
     const emails = snapshot.docs.map(doc => {
       const data = doc.data();
-      const dateValue = data.date?.toDate?.()?.toISOString() || data.date;
+      // Handle date - could be in date, sentAt, or receivedAt field
+      const getDateValue = (val: unknown): string | null => {
+        if (!val) return null;
+        if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+          return (val as { toDate: () => Date }).toDate().toISOString();
+        }
+        if (val instanceof Date) {
+          return val.toISOString();
+        }
+        if (typeof val === 'string') {
+          return val;
+        }
+        return null;
+      };
+      const dateValue = getDateValue(data.date) || getDateValue(data.sentAt) || getDateValue(data.receivedAt) || getDateValue(data.createdAt);
+
       return {
         id: doc.id,
         subject: data.subject,
@@ -1343,7 +3679,7 @@ app.get('/emails/startup/:startupId', authenticate, async (req: AuthRequest, res
         fromAddress: data.from,
         fromName: data.fromName,
         toAddresses: data.to ? [{ email: data.to }] : [],
-        bodyPreview: data.body,
+        bodyPreview: data.body?.substring(0, 500) || '',
         bodyHtml: data.bodyHtml || null,
         receivedAt: dateValue,
         // Also include original fields for compatibility
@@ -1355,7 +3691,8 @@ app.get('/emails/startup/:startupId', authenticate, async (req: AuthRequest, res
         isRead: data.isRead !== false,
         labels: data.labels || [],
         startupId: data.startupId,
-        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+        emailType: data.emailType || null,
+        createdAt: getDateValue(data.createdAt),
       };
     });
 
@@ -1672,13 +4009,9 @@ async function analyzeDeckWithAI(deckId: string, fileBuffer: Buffer, fileName: s
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    // For PDFs, we'll analyze based on text extraction
-    // Note: Full PDF parsing would require additional libraries
-    const prompt = `Analyze this startup pitch deck file named "${fileName}".
-
-Based on the file name and any context you have, provide an analysis in this JSON format:
+    const prompt = `Analyze this startup pitch deck and provide a detailed analysis in this JSON format:
 {
-  "score": number (0-100, estimated quality score),
+  "score": number (0-100, quality/investment potential score),
   "summary": string (2-3 sentence summary of the pitch),
   "strengths": string[] (3-5 key strengths),
   "weaknesses": string[] (3-5 areas for improvement),
@@ -1693,7 +4026,25 @@ Based on the file name and any context you have, provide an analysis in this JSO
 
 Respond with ONLY the JSON object.`;
 
-    const result = await model.generateContent(prompt);
+    let result;
+
+    // If we have a PDF buffer, send it to Gemini for visual analysis
+    if (fileBuffer && fileBuffer.length > 0 && fileName.toLowerCase().endsWith('.pdf')) {
+      console.log(`[Deck Analysis] Analyzing PDF with ${fileBuffer.length} bytes`);
+      result = await model.generateContent([
+        {
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: fileBuffer.toString('base64'),
+          },
+        },
+        prompt,
+      ]);
+    } else {
+      // Fallback to text-only prompt with filename
+      console.log(`[Deck Analysis] Analyzing based on filename: ${fileName}`);
+      result = await model.generateContent(`Analyze this startup pitch deck file named "${fileName}".\n\n${prompt}`);
+    }
     const response = await result.response;
     const text = response.text();
 
@@ -1714,7 +4065,8 @@ Respond with ONLY the JSON object.`;
         const startupRef = db.collection('startups').doc(startupId);
         const startupDoc = await startupRef.get();
         if (startupDoc.exists) {
-          const currentScore = startupDoc.data()?.currentScore || 0;
+          const startupData = startupDoc.data()!;
+          const currentScore = startupData?.currentScore || 0;
           // Average with existing score or use deck score
           const newScore = currentScore > 0 ? Math.round((currentScore + analysis.score) / 2) : analysis.score;
           await startupRef.update({
@@ -1722,6 +4074,59 @@ Respond with ONLY the JSON object.`;
             deckScore: analysis.score,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
+
+          // Create score events based on analysis
+          const scoreEvents: Array<{
+            category: string;
+            signal: string;
+            impact: number;
+            evidence: string;
+          }> = [];
+
+          // Add events for strengths (positive signals)
+          if (analysis.strengths && Array.isArray(analysis.strengths)) {
+            for (const strength of analysis.strengths.slice(0, 3)) {
+              scoreEvents.push({
+                category: 'product',
+                signal: 'Pitch deck strength',
+                impact: 3,
+                evidence: strength,
+              });
+            }
+          }
+
+          // Add events for weaknesses (concerns)
+          if (analysis.weaknesses && Array.isArray(analysis.weaknesses)) {
+            for (const weakness of analysis.weaknesses.slice(0, 2)) {
+              scoreEvents.push({
+                category: 'deal',
+                signal: 'Area of concern',
+                impact: -2,
+                evidence: weakness,
+              });
+            }
+          }
+
+          // Add overall deck analysis event
+          scoreEvents.push({
+            category: 'product',
+            signal: 'Pitch deck analyzed',
+            impact: analysis.score >= 70 ? 5 : analysis.score >= 50 ? 2 : 0,
+            evidence: `AI analysis score: ${analysis.score}/100. ${analysis.summary || ''}`,
+          });
+
+          // Create all score events
+          for (const event of scoreEvents) {
+            await db.collection('scoreEvents').add({
+              startupId,
+              organizationId: startupData.organizationId,
+              ...event,
+              source: 'deck_analysis',
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+
+          console.log(`[Deck Analysis] Created ${scoreEvents.length} score events for startup ${startupId}`);
         }
       }
 
@@ -1738,7 +4143,8 @@ Respond with ONLY the JSON object.`;
 
 app.post('/decks/:id/reprocess', authenticate, async (req: AuthRequest, res) => {
   try {
-    const deckDoc = await db.collection('decks').doc(req.params.id as string).get();
+    const deckId = req.params.id as string;
+    const deckDoc = await db.collection('decks').doc(deckId).get();
 
     if (!deckDoc.exists) {
       return res.status(404).json({ error: 'Deck not found' });
@@ -1752,14 +4158,74 @@ app.post('/decks/:id/reprocess', authenticate, async (req: AuthRequest, res) => 
     // Mark as processing
     await deckDoc.ref.update({ status: 'processing' });
 
-    // Re-run analysis (would need to re-fetch file from storage)
-    // For now, just mark as processed
-    await deckDoc.ref.update({ status: 'processed' });
+    // Fetch file from storage if storagePath exists
+    let fileBuffer: Buffer | null = null;
+    if (data.storagePath) {
+      try {
+        const bucket = admin.storage().bucket();
+        const file = bucket.file(data.storagePath);
+        const [exists] = await file.exists();
+        if (exists) {
+          const [contents] = await file.download();
+          fileBuffer = contents;
+        }
+      } catch (downloadError) {
+        console.error('[Reprocess] Failed to download file:', downloadError);
+      }
+    }
+
+    // Run AI analysis
+    await analyzeDeckWithAI(deckId, fileBuffer || Buffer.from(''), data.fileName, data.startupId);
 
     return res.json({ success: true });
   } catch (error) {
     console.error('Reprocess deck error:', error);
     return res.status(500).json({ error: 'Failed to reprocess deck' });
+  }
+});
+
+// Download deck file - serves the file through the backend
+app.get('/decks/:id/download', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const deckDoc = await db.collection('decks').doc(req.params.id as string).get();
+
+    if (!deckDoc.exists) {
+      return res.status(404).json({ error: 'Deck not found' });
+    }
+
+    const data = deckDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Deck not found' });
+    }
+
+    if (!data.storagePath) {
+      return res.status(404).json({ error: 'File not found in storage' });
+    }
+
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(data.storagePath);
+
+    const [exists] = await file.exists();
+    if (!exists) {
+      return res.status(404).json({ error: 'File not found in storage' });
+    }
+
+    // Set appropriate headers
+    res.setHeader('Content-Type', data.mimeType || 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${data.fileName}"`);
+
+    // Stream the file to the response
+    const stream = file.createReadStream();
+    stream.pipe(res);
+
+    // Return a promise that resolves when stream completes
+    return new Promise<void>((resolve, reject) => {
+      stream.on('end', resolve);
+      stream.on('error', reject);
+    });
+  } catch (error) {
+    console.error('Download deck error:', error);
+    return res.status(500).json({ error: 'Failed to download deck' });
   }
 });
 
@@ -1872,6 +4338,153 @@ app.post('/startups/:id/score-events', authenticate, async (req: AuthRequest, re
   }
 });
 
+// Generate score events for existing startup (backfill)
+app.post('/startups/:id/generate-score-events', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startup = startupDoc.data()!;
+
+    // Check if already has score events
+    const existingEvents = await db.collection('scoreEvents')
+      .where('startupId', '==', startupId)
+      .limit(1)
+      .get();
+
+    if (!existingEvents.empty) {
+      return res.json({ message: 'Score events already exist', eventsCreated: 0 });
+    }
+
+    const scoreEvents: Array<{category: string; signal: string; impact: number; evidence: string}> = [];
+
+    // Add initial event
+    scoreEvents.push({
+      category: 'deal',
+      signal: 'Startup added to pipeline',
+      impact: 0,
+      evidence: `${startup.name} added for evaluation`,
+    });
+
+    // Generate events from score breakdown if available
+    if (startup.scoreBreakdown) {
+      const breakdown = startup.scoreBreakdown;
+      if (breakdown.team?.base >= 7) {
+        scoreEvents.push({
+          category: 'team',
+          signal: 'Strong team signal',
+          impact: 5,
+          evidence: `Team score: ${breakdown.team.base}/10`,
+        });
+      } else if (breakdown.team?.base >= 5) {
+        scoreEvents.push({
+          category: 'team',
+          signal: 'Team evaluated',
+          impact: 2,
+          evidence: `Team score: ${breakdown.team.base}/10`,
+        });
+      }
+
+      if (breakdown.market?.base >= 7) {
+        scoreEvents.push({
+          category: 'market',
+          signal: 'Attractive market',
+          impact: 5,
+          evidence: `Market score: ${breakdown.market.base}/10`,
+        });
+      } else if (breakdown.market?.base >= 5) {
+        scoreEvents.push({
+          category: 'market',
+          signal: 'Market evaluated',
+          impact: 2,
+          evidence: `Market score: ${breakdown.market.base}/10`,
+        });
+      }
+
+      if (breakdown.product?.base >= 7) {
+        scoreEvents.push({
+          category: 'product',
+          signal: 'Strong product/tech',
+          impact: 5,
+          evidence: `Product score: ${breakdown.product.base}/10`,
+        });
+      } else if (breakdown.product?.base >= 5) {
+        scoreEvents.push({
+          category: 'product',
+          signal: 'Product evaluated',
+          impact: 2,
+          evidence: `Product score: ${breakdown.product.base}/10`,
+        });
+      }
+
+      if (breakdown.traction?.base >= 7) {
+        scoreEvents.push({
+          category: 'traction',
+          signal: 'Good traction signals',
+          impact: 5,
+          evidence: `Traction score: ${breakdown.traction.base}/10`,
+        });
+      }
+
+      if (breakdown.redFlags && breakdown.redFlags < -3) {
+        scoreEvents.push({
+          category: 'deal',
+          signal: 'Red flags detected',
+          impact: breakdown.redFlags,
+          evidence: 'AI detected potential concerns',
+        });
+      }
+    }
+
+    // Add business model event
+    if (startup.businessModelAnalysis) {
+      const bma = startup.businessModelAnalysis;
+      scoreEvents.push({
+        category: 'product',
+        signal: 'Business model identified',
+        impact: 2,
+        evidence: `${bma.businessModel?.type || 'Unknown'} model in ${bma.sector || startup.sector || 'Unknown'} sector`,
+      });
+    }
+
+    // Add overall score event
+    if (startup.currentScore) {
+      scoreEvents.push({
+        category: 'deal',
+        signal: 'AI score generated',
+        impact: startup.currentScore >= 70 ? 5 : startup.currentScore >= 50 ? 2 : 0,
+        evidence: `Overall investment score: ${startup.currentScore}/100`,
+      });
+    }
+
+    // Create all events
+    for (const event of scoreEvents) {
+      await db.collection('scoreEvents').add({
+        startupId,
+        organizationId: startup.organizationId,
+        ...event,
+        source: 'backfill',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    console.log(`[GenerateScoreEvents] Created ${scoreEvents.length} events for ${startup.name}`);
+
+    return res.json({
+      success: true,
+      eventsCreated: scoreEvents.length,
+      events: scoreEvents,
+    });
+  } catch (error) {
+    console.error('Generate score events error:', error);
+    return res.status(500).json({ error: 'Failed to generate score events' });
+  }
+});
+
 // ==================== EVALUATION ROUTES ====================
 
 app.get('/evaluation/:startupId', authenticate, async (req: AuthRequest, res) => {
@@ -1941,11 +4554,74 @@ app.post('/startups/:id/send-reply', authenticate, async (req: AuthRequest, res)
     }
 
     const data = startupDoc.data()!;
-    // In a real implementation, this would send an email
+    const toEmail = data.founderEmail || 'unknown@email.com';
+    const draftReply = data.draftReply || '';
+
+    if (!draftReply) {
+      return res.status(400).json({ error: 'No draft reply to send' });
+    }
+
+    // Get inbox config for SMTP
+    const config = await getInboxConfig(req.user!.organizationId);
+    if (!config) {
+      return res.status(400).json({ error: 'No email configuration found. Please configure your email inbox first.' });
+    }
+    const fromEmail = config.user;
+    const emailSubject = `Re: ${data.name} - Follow Up`;
+
+    console.log(`[SendReply] Attempting to send email to ${toEmail} for ${data.name}`);
+
+    // Actually send the email via SMTP
+    const sendResult = await sendEmailViaSMTP(config, {
+      from: fromEmail,
+      fromName: 'Nitish',
+      to: toEmail,
+      subject: emailSubject,
+      body: draftReply,
+    });
+
+    if (!sendResult.success) {
+      console.error(`[SendReply] SMTP send failed: ${sendResult.error}`);
+      return res.status(500).json({
+        error: 'Failed to send email via SMTP',
+        details: sendResult.error
+      });
+    }
+
+    // Record the outgoing email in the emails collection
+    const emailRef = db.collection('emails').doc();
+    await emailRef.set({
+      startupId,
+      organizationId: req.user!.organizationId,
+      subject: emailSubject,
+      from: fromEmail,
+      fromName: 'Nitish',
+      to: toEmail,
+      body: draftReply,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      direction: 'outbound',
+      isRead: true,
+      labels: ['reply', 'sent'],
+      messageId: sendResult.messageId || `sent-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+      smtpMessageId: sendResult.messageId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Update startup draft reply status
+    await startupDoc.ref.update({
+      draftReplyStatus: 'sent',
+      lastEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    console.log(`[SendReply] Email sent successfully to ${toEmail} for ${data.name}, messageId: ${sendResult.messageId}`);
+
     return res.json({
       success: true,
-      to: data.founderEmail || 'unknown@email.com',
-      message: 'Email sending not implemented in cloud version'
+      to: toEmail,
+      emailId: emailRef.id,
+      smtpMessageId: sendResult.messageId,
+      message: 'Email sent successfully'
     });
   } catch (error) {
     console.error('Send reply error:', error);
@@ -1953,15 +4629,119 @@ app.post('/startups/:id/send-reply', authenticate, async (req: AuthRequest, res)
   }
 });
 
+// Create a new outgoing email (compose)
+app.post('/emails/startup/:startupId/compose', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.startupId as string;
+    const { to, subject, body, replyToEmailId } = req.body;
+
+    // Verify startup exists and belongs to user's org
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists || startupDoc.data()?.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+
+    // Get inbox config for SMTP
+    const config = await getInboxConfig(req.user!.organizationId);
+    if (!config) {
+      return res.status(400).json({ error: 'No email configuration found. Please configure your email inbox first.' });
+    }
+    const fromEmail = config.user;
+
+    // Determine recipient email
+    const toEmail = to || startupData.founderEmail;
+    if (!toEmail) {
+      return res.status(400).json({ error: 'No recipient email provided' });
+    }
+
+    const emailSubject = subject || `Re: ${startupData.name}`;
+    const emailBody = body || '';
+
+    if (!emailBody.trim()) {
+      return res.status(400).json({ error: 'Email body cannot be empty' });
+    }
+
+    console.log(`[ComposeEmail] Attempting to send email to ${toEmail} for startup ${startupData.name}`);
+
+    // Actually send the email via SMTP
+    const sendResult = await sendEmailViaSMTP(config, {
+      from: fromEmail,
+      fromName: 'Nitish',
+      to: toEmail,
+      subject: emailSubject,
+      body: emailBody,
+    });
+
+    if (!sendResult.success) {
+      console.error(`[ComposeEmail] SMTP send failed: ${sendResult.error}`);
+      return res.status(500).json({
+        error: 'Failed to send email via SMTP',
+        details: sendResult.error
+      });
+    }
+
+    // Create the email record
+    const emailRef = db.collection('emails').doc();
+    await emailRef.set({
+      startupId,
+      organizationId: req.user!.organizationId,
+      subject: emailSubject,
+      from: fromEmail,
+      fromName: 'Nitish',
+      to: toEmail,
+      body: emailBody,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      direction: 'outbound',
+      isRead: true,
+      labels: replyToEmailId ? ['reply', 'sent'] : ['sent'],
+      replyToEmailId: replyToEmailId || null,
+      messageId: sendResult.messageId || `sent-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+      smtpMessageId: sendResult.messageId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Update startup's last contact
+    await startupDoc.ref.update({
+      lastEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    console.log(`[ComposeEmail] Email sent successfully to ${toEmail} for startup ${startupData.name}, messageId: ${sendResult.messageId}`);
+
+    return res.json({
+      success: true,
+      emailId: emailRef.id,
+      to: toEmail,
+      subject: emailSubject,
+      smtpMessageId: sendResult.messageId,
+      message: 'Email sent successfully'
+    });
+  } catch (error) {
+    console.error('Compose email error:', error);
+    return res.status(500).json({ error: 'Failed to compose email' });
+  }
+});
+
 app.patch('/startups/:id/draft-reply', authenticate, async (req: AuthRequest, res) => {
   try {
     const startupId = req.params.id as string;
-    const { draftReply } = req.body;
+    const { draftReply, draftReplyStatus } = req.body;
 
-    await db.collection('startups').doc(startupId).update({
-      draftReply,
+    const updateData: Record<string, unknown> = {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+
+    if (draftReply !== undefined) {
+      updateData.draftReply = draftReply;
+    }
+
+    if (draftReplyStatus !== undefined) {
+      updateData.draftReplyStatus = draftReplyStatus;
+    }
+
+    await db.collection('startups').doc(startupId).update(updateData);
 
     return res.json({ success: true });
   } catch (error) {
@@ -2031,6 +4811,278 @@ app.get('/inbox/config', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('Get inbox config error:', error);
     return res.json(null);
+  }
+});
+
+// Re-scan attachments for a startup by re-fetching original email
+app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const id = req.params.id as string;
+
+    // Get the startup
+    const startupDoc = await db.collection('startups').doc(id).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get the email record for this startup
+    const emailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', id)
+      .where('direction', '==', 'inbound')
+      .orderBy('date', 'asc')
+      .limit(1)
+      .get();
+
+    if (emailsSnapshot.empty) {
+      return res.status(404).json({ error: 'No inbound email found for this startup' });
+    }
+
+    const emailDoc = emailsSnapshot.docs[0];
+    const emailData = emailDoc.data();
+    // Only use messageId if it looks like a real IMAP Message-ID (contains @ or angle brackets)
+    const rawMessageId = emailData.messageId;
+    const isRealMessageId = rawMessageId && (rawMessageId.includes('@') || rawMessageId.includes('<'));
+    const messageId = isRealMessageId ? rawMessageId : null;
+
+    // Handle Firestore Timestamp for date
+    let emailDate: Date;
+    if (emailData.date && typeof emailData.date.toDate === 'function') {
+      emailDate = emailData.date.toDate();
+    } else if (emailData.date instanceof Date) {
+      emailDate = emailData.date;
+    } else if (typeof emailData.date === 'string') {
+      emailDate = new Date(emailData.date);
+    } else {
+      emailDate = new Date(); // fallback
+    }
+
+    console.log(`[RescanAttachments] Found email record: subject="${emailData.subject}", messageId="${rawMessageId || 'NONE'}" (real=${isRealMessageId}), date="${emailDate.toISOString()}", from="${emailData.from}"`);
+
+    // Get IMAP config using the shared helper function
+    console.log(`[RescanAttachments] Getting IMAP config for org: ${req.user!.organizationId}`);
+    const config = await getInboxConfig(req.user!.organizationId);
+    if (!config) {
+      console.log(`[RescanAttachments] No inbox config found`);
+      return res.status(400).json({ error: 'No inbox configured' });
+    }
+    console.log(`[RescanAttachments] Connecting to IMAP: ${config.host}:${config.port}, folder: ${config.folder}`);
+
+    // Connect to IMAP and search for the email
+    const client = new ImapFlow({
+      host: config.host,
+      port: config.port,
+      secure: config.tls,
+      auth: {
+        user: config.user,
+        pass: config.password,
+      },
+      logger: false,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+
+    let attachmentsFound = 0;
+    const attachmentData: Array<{
+      fileName: string;
+      mimeType: string;
+      size: number;
+      storagePath?: string;
+      storageUrl?: string;
+    }> = [];
+
+    try {
+      console.log(`[RescanAttachments] Attempting IMAP connect...`);
+      await client.connect();
+      console.log(`[RescanAttachments] Connected, opening mailbox: ${config.folder}`);
+      await client.mailboxOpen(config.folder);
+      console.log(`[RescanAttachments] Mailbox opened`);
+
+      let uidsToCheck: number[] = [];
+
+      // First try to search by message-id if available
+      if (messageId) {
+        console.log(`[RescanAttachments] Searching for email with messageId: ${messageId}`);
+        const searchResult = await client.search({ header: { 'Message-ID': messageId } });
+        uidsToCheck = Array.isArray(searchResult) ? searchResult : [];
+      }
+
+      // If no results or no messageId, try broader search by subject and date
+      if (uidsToCheck.length === 0) {
+        const sinceDate = new Date(emailDate);
+        sinceDate.setDate(sinceDate.getDate() - 7); // Search wider date range (7 days before)
+
+        // Try searching by subject first - use shorter substring and remove special chars
+        const subjectStr = typeof emailData.subject === 'string'
+          ? emailData.subject.substring(0, 30).replace(/[|&@#$%^*(){}[\]]/g, ' ').trim()
+          : '';
+
+        if (subjectStr.length > 5) {
+          console.log(`[RescanAttachments] Searching by subject: "${subjectStr}" since ${sinceDate.toISOString()}`);
+          const searchBySubject = await client.search({
+            since: sinceDate,
+            subject: subjectStr
+          });
+          uidsToCheck = Array.isArray(searchBySubject) ? searchBySubject : [];
+          console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails matching subject`);
+        }
+
+        // If still no results, try searching by sender email
+        if (uidsToCheck.length === 0 && emailData.from) {
+          console.log(`[RescanAttachments] Searching by sender: "${emailData.from}" since ${sinceDate.toISOString()}`);
+          const searchByFrom = await client.search({
+            since: sinceDate,
+            from: emailData.from
+          });
+          uidsToCheck = Array.isArray(searchByFrom) ? searchByFrom : [];
+          console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails from sender`);
+
+          // If multiple results, try to match by subject similarity
+          if (uidsToCheck.length > 1 && subjectStr) {
+            console.log(`[RescanAttachments] Multiple emails found, will check ${Math.min(uidsToCheck.length, 5)} for subject match`);
+            // Check first few emails to find best match
+            for (const checkUid of uidsToCheck.slice(0, 5)) {
+              const checkMsg = await client.fetchOne(checkUid, { envelope: true });
+              if (checkMsg && typeof checkMsg === 'object' && 'envelope' in checkMsg) {
+                const envelope = checkMsg.envelope as { subject?: string };
+                if (envelope.subject && envelope.subject.toLowerCase().includes(subjectStr.toLowerCase().substring(0, 15))) {
+                  console.log(`[RescanAttachments] Found matching email: "${envelope.subject}"`);
+                  uidsToCheck = [checkUid];
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (uidsToCheck.length === 0) {
+          await client.logout();
+          return res.status(404).json({ error: 'Could not find original email in inbox. The email may have been deleted or moved.' });
+        }
+      }
+
+      const uid = uidsToCheck[0];
+      const message = await client.fetchOne(uid, { source: true });
+
+      if (message && typeof message === 'object' && 'source' in message && message.source) {
+        const parsed: ParsedMail = await simpleParser(message.source as Buffer);
+
+        console.log(`[RescanAttachments] Found email: ${parsed.subject}`);
+        console.log(`[RescanAttachments] Attachments: ${parsed.attachments?.length || 0}`);
+
+        if (parsed.attachments && parsed.attachments.length > 0) {
+          for (const attachment of parsed.attachments) {
+            const relevantMimeTypes = [
+              'application/pdf',
+              'application/vnd.ms-powerpoint',
+              'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+              'application/msword',
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            ];
+
+            const fileName = attachment.filename || 'attachment';
+            const isPDF = fileName.toLowerCase().endsWith('.pdf');
+            const isPPT = fileName.toLowerCase().endsWith('.ppt') || fileName.toLowerCase().endsWith('.pptx');
+            const isDOC = fileName.toLowerCase().endsWith('.doc') || fileName.toLowerCase().endsWith('.docx');
+
+            if (relevantMimeTypes.includes(attachment.contentType) || isPDF || isPPT || isDOC) {
+              try {
+                // Check if deck already exists for this file
+                const existingDeck = await db.collection('decks')
+                  .where('startupId', '==', id)
+                  .where('fileName', '==', fileName)
+                  .get();
+
+                if (!existingDeck.empty) {
+                  console.log(`[RescanAttachments] Deck already exists for ${fileName}, skipping`);
+                  continue;
+                }
+
+                // Store attachment in Firebase Storage
+                const bucket = admin.storage().bucket();
+                const storagePath = `attachments/${req.user!.organizationId}/${id}/${Date.now()}-${fileName}`;
+                const file = bucket.file(storagePath);
+
+                await file.save(attachment.content, {
+                  metadata: {
+                    contentType: attachment.contentType,
+                    metadata: {
+                      originalName: fileName,
+                      startupId: id,
+                    },
+                  },
+                  public: true, // Make file publicly readable
+                });
+
+                // Use the public URL format for Firebase Storage
+                const bucketName = bucket.name;
+                const fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media`;
+                console.log(`[RescanAttachments] Stored file with public URL: ${fileName}`);
+
+                // Create deck record
+                const deckRef = db.collection('decks').doc();
+                await deckRef.set({
+                  startupId: id,
+                  organizationId: req.user!.organizationId,
+                  fileName,
+                  fileSize: attachment.size || attachment.content.length,
+                  fileUrl,
+                  storagePath,
+                  mimeType: attachment.contentType,
+                  source: 'email_rescan',
+                  status: 'uploaded',
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+
+                attachmentData.push({
+                  fileName,
+                  mimeType: attachment.contentType,
+                  size: attachment.size || attachment.content.length,
+                  storagePath,
+                  storageUrl: fileUrl,
+                });
+
+                attachmentsFound++;
+                console.log(`[RescanAttachments] Stored attachment: ${fileName}`);
+              } catch (attachmentError) {
+                console.error(`[RescanAttachments] Failed to store attachment ${fileName}:`, attachmentError);
+              }
+            }
+          }
+        }
+      }
+
+      await client.logout();
+    } catch (imapError) {
+      console.error('[RescanAttachments] IMAP error:', imapError);
+      return res.status(500).json({ error: 'Failed to connect to email inbox' });
+    }
+
+    // Update startup hasAttachments flag if we found any
+    if (attachmentsFound > 0) {
+      await db.collection('startups').doc(id).update({
+        hasAttachments: true,
+        attachmentCount: admin.firestore.FieldValue.increment(attachmentsFound),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    return res.json({
+      success: true,
+      attachmentsFound,
+      attachments: attachmentData,
+      message: attachmentsFound > 0
+        ? `Found and stored ${attachmentsFound} attachment(s)`
+        : 'No new attachments found in the original email'
+    });
+  } catch (error) {
+    console.error('[RescanAttachments] Error:', error);
+    return res.status(500).json({ error: 'Failed to rescan attachments' });
   }
 });
 

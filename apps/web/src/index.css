@@ -3,30 +3,75 @@
 @tailwind utilities;
 
 @layer base {
+  /* Prevent iOS zoom on input focus */
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+    -webkit-tap-highlight-color: transparent;
+  }
+
   body {
     @apply bg-gray-50 text-gray-900 antialiased;
+    /* Prevent pull-to-refresh on mobile */
+    overscroll-behavior-y: contain;
+    /* Safe area insets for notched devices */
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* Fix for iOS Safari bottom bar */
+  @supports (-webkit-touch-callout: none) {
+    .min-h-screen {
+      min-height: -webkit-fill-available;
+    }
   }
 }
 
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    /* Minimum touch target size for mobile */
+    min-height: 44px;
+    /* Prevent double-tap zoom on iOS */
+    touch-action: manipulation;
+    /* Active state for touch feedback */
+    -webkit-tap-highlight-color: transparent;
   }
 
   .btn-primary {
-    @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
+    @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500 active:bg-primary-800;
   }
 
   .btn-secondary {
-    @apply btn bg-white text-gray-700 border border-gray-300 hover:bg-gray-50 focus:ring-primary-500;
+    @apply btn bg-white text-gray-700 border border-gray-300 hover:bg-gray-50 focus:ring-primary-500 active:bg-gray-100;
   }
 
   .btn-danger {
-    @apply btn bg-danger-600 text-white hover:bg-danger-500 focus:ring-danger-500;
+    @apply btn bg-danger-600 text-white hover:bg-danger-500 focus:ring-danger-500 active:bg-danger-700;
+  }
+
+  /* Smaller button variant for tight spaces */
+  .btn-sm {
+    min-height: 36px;
+    @apply px-3 py-1.5 text-xs;
   }
 
   .input {
-    @apply block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500;
+    @apply block w-full px-3 py-2 text-base sm:text-sm border border-gray-300 rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500;
+    /* Minimum touch target height */
+    min-height: 44px;
+    /* Prevent iOS zoom on focus */
+    font-size: 16px;
+  }
+
+  @media (min-width: 640px) {
+    .input {
+      font-size: 14px;
+    }
   }
 
   .label {
@@ -83,4 +128,41 @@
 
 .animate-pulse-slow {
   animation: pulse-slow 2s ease-in-out infinite;
+}
+
+/* Mobile utility for indented content */
+.pl-13 {
+  padding-left: 3.25rem; /* 52px = 40px icon + 12px gap */
+}
+
+/* Improve scrolling on iOS */
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Safe area bottom padding for iOS */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Fix for position:fixed on iOS Safari */
+@supports (-webkit-touch-callout: none) {
+  .fixed {
+    -webkit-transform: translateZ(0);
+  }
+}
+
+/* Prevent text selection on buttons for better UX */
+button, a {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Improve focus visibility on mobile */
+@media (hover: none) {
+  .focus\:ring-2:focus {
+    --tw-ring-offset-width: 0px;
+  }
 }

@@ -22,6 +22,7 @@ const statusOptions: { value: DealStatus; label: string }[] = [
   { value: 'reviewing', label: 'Reviewing' },
   { value: 'due_diligence', label: 'Due Diligence' },
   { value: 'invested', label: 'Invested' },
+  { value: 'snoozed', label: 'Snoozed' },
   { value: 'passed', label: 'Passed' },
 ];
 
@@ -38,6 +39,7 @@ const statusColors: Record<DealStatus, string> = {
   reviewing: 'bg-blue-100 text-blue-700',
   due_diligence: 'bg-yellow-100 text-yellow-700',
   invested: 'bg-green-100 text-green-700',
+  snoozed: 'bg-orange-100 text-orange-700',
   passed: 'bg-gray-100 text-gray-700',
   archived: 'bg-gray-100 text-gray-500',
 };
@@ -88,24 +90,24 @@ export default function StartupsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Startups</h1>
-          <p className="text-gray-600">
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Startups</h1>
+          <p className="text-sm sm:text-base text-gray-600">
             {data?.total ?? 0} startup{(data?.total ?? 0) !== 1 ? 's' : ''} in your pipeline
           </p>
         </div>
-        <button onClick={() => setShowCreateModal(true)} className="btn-primary">
+        <button onClick={() => setShowCreateModal(true)} className="btn-primary min-h-[44px] w-full sm:w-auto justify-center">
           <Plus className="w-4 h-4 mr-2" />
           Add Startup
         </button>
       </div>
 
       {/* Filters */}
-      <div className="card p-4">
-        <div className="flex flex-wrap items-center gap-4">
+      <div className="card p-3 sm:p-4">
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3 sm:gap-4">
           {/* Search */}
-          <form onSubmit={handleSearch} className="flex-1 min-w-[200px]">
+          <form onSubmit={handleSearch} className="flex-1 min-w-0 sm:min-w-[200px]">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
@@ -113,38 +115,40 @@ export default function StartupsPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search startups..."
-                className="input pl-10"
+                className="input pl-10 min-h-[44px]"
               />
             </div>
           </form>
 
-          {/* Status filter */}
-          <select
-            value={status ?? ''}
-            onChange={(e) => handleFilterChange('status', e.target.value || null)}
-            className="input w-auto"
-          >
-            <option value="">All statuses</option>
-            {statusOptions.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+          <div className="flex gap-2 sm:gap-4">
+            {/* Status filter */}
+            <select
+              value={status ?? ''}
+              onChange={(e) => handleFilterChange('status', e.target.value || null)}
+              className="input flex-1 sm:w-auto min-h-[44px]"
+            >
+              <option value="">All statuses</option>
+              {statusOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
 
-          {/* Stage filter */}
-          <select
-            value={stage ?? ''}
-            onChange={(e) => handleFilterChange('stage', e.target.value || null)}
-            className="input w-auto"
-          >
-            <option value="">All stages</option>
-            {stageOptions.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+            {/* Stage filter */}
+            <select
+              value={stage ?? ''}
+              onChange={(e) => handleFilterChange('stage', e.target.value || null)}
+              className="input flex-1 sm:w-auto min-h-[44px]"
+            >
+              <option value="">All stages</option>
+              {stageOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -174,22 +178,22 @@ export default function StartupsPage() {
             <Link
               key={startup.id}
               to={`/startups/${startup.id}`}
-              className="flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+              className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3"
             >
-              <div className="flex items-center gap-4">
-                <div className="flex items-center justify-center w-12 h-12 bg-primary-100 rounded-lg">
-                  <span className="text-xl font-bold text-primary-600">
+              <div className="flex items-center gap-3 sm:gap-4">
+                <div className="flex items-center justify-center w-10 sm:w-12 h-10 sm:h-12 bg-primary-100 rounded-lg flex-shrink-0">
+                  <span className="text-lg sm:text-xl font-bold text-primary-600">
                     {startup.name.charAt(0)}
                   </span>
                 </div>
-                <div>
-                  <p className="font-semibold text-gray-900">{startup.name}</p>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className={clsx('badge', statusColors[startup.status])}>
+                <div className="min-w-0">
+                  <p className="font-semibold text-gray-900 truncate">{startup.name}</p>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className={clsx('badge text-xs', statusColors[startup.status])}>
                       {statusOptions.find((s) => s.value === startup.status)?.label}
                     </span>
                     {startup.stage && (
-                      <span className="badge bg-gray-100 text-gray-600">
+                      <span className="badge bg-gray-100 text-gray-600 text-xs">
                         {stageOptions.find((s) => s.value === startup.stage)?.label}
                       </span>
                     )}
@@ -197,21 +201,21 @@ export default function StartupsPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-4 sm:gap-6 pl-13 sm:pl-0">
                 {/* Score */}
-                <div className="text-right">
+                <div className="text-left sm:text-right">
                   <div className="flex items-center gap-1">
-                    <span className="text-2xl font-bold text-gray-900">
+                    <span className="text-xl sm:text-2xl font-bold text-gray-900">
                       {startup.currentScore ?? '-'}
                     </span>
                     {startup.scoreTrend === 'up' && (
-                      <TrendingUp className="w-5 h-5 text-success-500" />
+                      <TrendingUp className="w-4 sm:w-5 h-4 sm:h-5 text-success-500" />
                     )}
                     {startup.scoreTrend === 'down' && (
-                      <TrendingDown className="w-5 h-5 text-danger-500" />
+                      <TrendingDown className="w-4 sm:w-5 h-4 sm:h-5 text-danger-500" />
                     )}
                     {startup.scoreTrend === 'stable' && (
-                      <Minus className="w-5 h-5 text-gray-400" />
+                      <Minus className="w-4 sm:w-5 h-4 sm:h-5 text-gray-400" />
                     )}
                   </div>
                   {startup.scoreTrendDelta != null && startup.scoreTrendDelta !== 0 && (
@@ -228,8 +232,8 @@ export default function StartupsPage() {
                 </div>
 
                 {/* Score bar */}
-                <div className="w-32">
-                  <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                <div className="w-20 sm:w-32">
+                  <div className="h-2 sm:h-3 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className={clsx(
                         'h-full rounded-full transition-all',

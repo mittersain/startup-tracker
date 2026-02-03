@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { startupsApi, decksApi, emailsApi } from '@/services/api';
+import { useAuthStore } from '@/stores/auth.store';
 import { useDropzone } from 'react-dropzone';
 import {
   ArrowLeft,
@@ -30,6 +31,20 @@ import {
   ArrowDownLeft,
   Pencil,
   Save,
+  RefreshCw,
+  PauseCircle,
+  XCircle,
+  Calendar,
+  MessageSquare,
+  Trash2,
+  Bot,
+  User,
+  Globe,
+  Newspaper,
+  Database,
+  Link,
+  Sparkles,
+  TrendingUp as TrendUp,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -61,6 +76,7 @@ const statusOptions: { value: DealStatus; label: string }[] = [
   { value: 'reviewing', label: 'Reviewing' },
   { value: 'due_diligence', label: 'Due Diligence' },
   { value: 'invested', label: 'Invested' },
+  { value: 'snoozed', label: 'Snoozed' },
   { value: 'passed', label: 'Passed' },
 ];
 
@@ -88,11 +104,31 @@ export default function StartupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'deck' | 'emails' | 'events'>('analysis');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'research' | 'deck' | 'emails' | 'events'>('analysis');
   const [copiedReply, setCopiedReply] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isEditingReply, setIsEditingReply] = useState(false);
   const [editedReply, setEditedReply] = useState('');
+  const [isComposingEmail, setIsComposingEmail] = useState(false);
+  const [composeSubject, setComposeSubject] = useState('');
+  const [composeBody, setComposeBody] = useState('');
+  const [replyToEmail, setReplyToEmail] = useState<Email | null>(null);
+  const [analyzingDeckId, setAnalyzingDeckId] = useState<string | null>(null);
+  const [analyzingDeckName, setAnalyzingDeckName] = useState<string | null>(null);
+
+  // Snooze/Pass modal state
+  const [decisionModalType, setDecisionModalType] = useState<'snooze' | 'pass' | null>(null);
+  const [decisionReason, setDecisionReason] = useState('');
+  const [snoozeMonths, setSnoozeMonths] = useState(3);
+  const [draftDecisionEmail, setDraftDecisionEmail] = useState('');
+  const [isGeneratingEmail, setIsGeneratingEmail] = useState(false);
+  const [showEmailPreview, setShowEmailPreview] = useState(false);
+
+  // AI Chat state
+  const [chatMessage, setChatMessage] = useState('');
+  const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>>([]);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
 
   const { data: startup, isLoading } = useQuery({
     queryKey: ['startup', id],
@@ -123,6 +159,85 @@ export default function StartupDetailPage() {
     queryFn: () => emailsApi.getMetrics(id!),
     enabled: !!id,
   });
+
+  // Fetch chat history
+  const { data: chatHistory } = useQuery({
+    queryKey: ['startup-chat', id],
+    queryFn: () => startupsApi.getChatHistory(id!),
+    enabled: !!id,
+  });
+
+  // Fetch enrichment data (poll every 5s while in progress)
+  const { data: enrichment, isLoading: isEnrichmentLoading } = useQuery({
+    queryKey: ['startup-enrichment', id],
+    queryFn: () => startupsApi.getEnrichment(id!),
+    enabled: !!id,
+    refetchInterval: (query) => {
+      // Poll every 5 seconds while enrichment is in progress
+      const data = query.state.data as { status?: string } | undefined;
+      return data?.status === 'in_progress' ? 5000 : false;
+    },
+  });
+
+  // Update chat messages when history loads
+  useEffect(() => {
+    if (chatHistory?.messages) {
+      setChatMessages(chatHistory.messages);
+    }
+  }, [chatHistory]);
+
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
+
+  // Send chat message mutation
+  const sendChatMutation = useMutation({
+    mutationFn: (message: string) => startupsApi.sendChatMessage(id!, message),
+    onSuccess: (data) => {
+      setChatMessages(prev => [...prev, data.userMessage, data.aiMessage]);
+      setChatMessage('');
+      setIsChatLoading(false);
+    },
+    onError: () => {
+      setIsChatLoading(false);
+      toast.error('Failed to send message');
+    },
+  });
+
+  // Clear chat mutation
+  const clearChatMutation = useMutation({
+    mutationFn: () => startupsApi.clearChatHistory(id!),
+    onSuccess: () => {
+      setChatMessages([]);
+      queryClient.invalidateQueries({ queryKey: ['startup-chat', id] });
+      toast.success('Chat history cleared');
+    },
+    onError: () => {
+      toast.error('Failed to clear chat history');
+    },
+  });
+
+  // Trigger enrichment mutation
+  const triggerEnrichmentMutation = useMutation({
+    mutationFn: () => startupsApi.triggerEnrichment(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-enrichment', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      toast.success('Enrichment started! Data will update shortly.');
+    },
+    onError: () => {
+      toast.error('Failed to start enrichment');
+    },
+  });
+
+  const handleSendChat = () => {
+    if (!chatMessage.trim() || isChatLoading) return;
+    setIsChatLoading(true);
+    sendChatMutation.mutate(chatMessage.trim());
+  };
 
   const statusMutation = useMutation({
     mutationFn: ({ status }: { status: DealStatus }) =>
@@ -161,6 +276,17 @@ export default function StartupDetailPage() {
     },
   });
 
+  const resetDraftStatusMutation = useMutation({
+    mutationFn: () => startupsApi.resetDraftReplyStatus(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      toast.success('Draft status reset - you can send again');
+    },
+    onError: () => {
+      toast.error('Failed to reset draft status');
+    },
+  });
+
   const uploadMutation = useMutation({
     mutationFn: (file: File) => decksApi.upload(id!, file),
     onSuccess: () => {
@@ -170,6 +296,119 @@ export default function StartupDetailPage() {
     },
     onError: () => {
       toast.error('Failed to upload deck');
+    },
+  });
+
+  const generateScoreEventsMutation = useMutation({
+    mutationFn: () => startupsApi.generateScoreEvents(id!),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['startup-events', id] });
+      toast.success(`Generated ${data.eventsCreated} score events!`);
+    },
+    onError: () => {
+      toast.error('Failed to generate score events');
+    },
+  });
+
+  const reprocessDeckMutation = useMutation({
+    mutationFn: (deckId: string) => decksApi.reprocess(deckId),
+    onSuccess: () => {
+      setAnalyzingDeckId(null);
+      setAnalyzingDeckName(null);
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-decks', id] });
+      toast.success('AI analysis complete!');
+    },
+    onError: () => {
+      setAnalyzingDeckId(null);
+      setAnalyzingDeckName(null);
+      toast.error('Failed to analyze document');
+    },
+  });
+
+  const rescanAttachmentsMutation = useMutation({
+    mutationFn: () => startupsApi.rescanAttachments(id!),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-decks', id] });
+      if (data.attachmentsFound > 0) {
+        toast.success(`Found ${data.attachmentsFound} attachment(s) from original email!`);
+      } else {
+        toast(data.message || 'No new attachments found in the original email');
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to rescan attachments');
+    },
+  });
+
+  const composeEmailMutation = useMutation({
+    mutationFn: (data: { subject: string; body: string; replyToEmailId?: string }) =>
+      emailsApi.compose(id!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-emails', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-comm-metrics', id] });
+      setIsComposingEmail(false);
+      setComposeSubject('');
+      setComposeBody('');
+      setReplyToEmail(null);
+      toast.success('Email sent and recorded');
+    },
+    onError: () => {
+      toast.error('Failed to send email');
+    },
+  });
+
+  // Snooze mutation - generates AI email and schedules follow-up
+  const snoozeMutation = useMutation({
+    mutationFn: ({ reason, followUpMonths }: { reason: string; followUpMonths: number }) =>
+      startupsApi.snooze(id!, reason, followUpMonths),
+    onSuccess: (data) => {
+      setIsGeneratingEmail(false);
+      setDraftDecisionEmail(data.draftEmail);
+      setShowEmailPreview(true);
+      toast.success(data.message);
+    },
+    onError: (error: Error & { response?: { data?: { message?: string } } }) => {
+      setIsGeneratingEmail(false);
+      const message = error.response?.data?.message || 'Failed to snooze deal';
+      toast.error(message);
+    },
+  });
+
+  // Pass mutation - generates AI rejection email
+  const passMutation = useMutation({
+    mutationFn: (reason: string) => startupsApi.pass(id!, reason),
+    onSuccess: (data) => {
+      setIsGeneratingEmail(false);
+      setDraftDecisionEmail(data.draftEmail);
+      setShowEmailPreview(true);
+      toast.success('Deal marked as passed. Review and send the email.');
+    },
+    onError: (error: Error & { response?: { data?: { message?: string } } }) => {
+      setIsGeneratingEmail(false);
+      const message = error.response?.data?.message || 'Failed to pass on deal';
+      toast.error(message);
+    },
+  });
+
+  // Send decision email mutation
+  const sendDecisionEmailMutation = useMutation({
+    mutationFn: ({ emailBody, emailSubject }: { emailBody: string; emailSubject?: string }) =>
+      startupsApi.sendDecisionEmail(id!, emailBody, emailSubject),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-emails', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      setShowEmailPreview(false);
+      setDecisionModalType(null);
+      setDecisionReason('');
+      setDraftDecisionEmail('');
+      toast.success('Email sent successfully');
+    },
+    onError: (error: Error & { response?: { data?: { message?: string } } }) => {
+      const message = error.response?.data?.message || 'Failed to send email';
+      toast.error(message);
     },
   });
 
@@ -239,31 +478,31 @@ export default function StartupDetailPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        <div className="flex items-start gap-3 sm:gap-4">
           <button
             onClick={() => navigate('/startups')}
-            className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+            className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 min-h-[44px] min-w-[44px] flex items-center justify-center flex-shrink-0"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
 
-          <div className="flex items-center justify-center w-16 h-16 bg-primary-100 rounded-xl">
-            <span className="text-2xl font-bold text-primary-600">
+          <div className="flex items-center justify-center w-12 sm:w-16 h-12 sm:h-16 bg-primary-100 rounded-xl flex-shrink-0">
+            <span className="text-xl sm:text-2xl font-bold text-primary-600">
               {startup.name.charAt(0)}
             </span>
           </div>
 
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-gray-900">{startup.name}</h1>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <h1 className="text-lg sm:text-2xl font-bold text-gray-900 truncate">{startup.name}</h1>
               {startup.sector && (
-                <span className="badge bg-primary-100 text-primary-700">
+                <span className="badge bg-primary-100 text-primary-700 text-xs">
                   {sectorLabels[startup.sector] || startup.sector}
                 </span>
               )}
               {startup.stage && (
-                <span className="badge bg-gray-100 text-gray-700">
+                <span className="badge bg-gray-100 text-gray-700 text-xs">
                   {stageLabels[startup.stage] || startup.stage}
                 </span>
               )}
@@ -273,23 +512,23 @@ export default function StartupDetailPage() {
                 href={startup.website}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-sm text-primary-600 hover:text-primary-700 flex items-center gap-1"
+                className="text-sm text-primary-600 hover:text-primary-700 flex items-center gap-1 truncate"
               >
-                {startup.website}
-                <ExternalLink className="w-3 h-3" />
+                <span className="truncate">{startup.website}</span>
+                <ExternalLink className="w-3 h-3 flex-shrink-0" />
               </a>
             )}
             {startup.description && (
-              <p className="text-gray-600 mt-1 max-w-xl">{startup.description}</p>
+              <p className="text-sm sm:text-base text-gray-600 mt-1 line-clamp-2 sm:line-clamp-none">{startup.description}</p>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 ml-auto sm:ml-0">
           <select
             value={startup.status}
             onChange={(e) => statusMutation.mutate({ status: e.target.value as DealStatus })}
-            className="input w-auto font-medium"
+            className="input w-auto font-medium min-h-[44px]"
           >
             {statusOptions.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -301,23 +540,23 @@ export default function StartupDetailPage() {
       </div>
 
       {/* Score card */}
-      <div className="card p-6">
-        <div className="flex items-start justify-between">
+      <div className="card p-4 sm:p-6">
+        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4 lg:gap-0">
           <div>
             <p className="text-sm text-gray-500 mb-1">Investibility Score</p>
             <div className="flex items-center gap-2">
-              <span className="text-4xl font-bold text-gray-900">
+              <span className="text-3xl sm:text-4xl font-bold text-gray-900">
                 {startup.currentScore ?? '-'}
               </span>
-              <span className="text-2xl text-gray-400">/100</span>
+              <span className="text-xl sm:text-2xl text-gray-400">/100</span>
               {startup.scoreTrend === 'up' && (
-                <TrendingUp className="w-6 h-6 text-success-500" />
+                <TrendingUp className="w-5 sm:w-6 h-5 sm:h-6 text-success-500" />
               )}
               {startup.scoreTrend === 'down' && (
-                <TrendingDown className="w-6 h-6 text-danger-500" />
+                <TrendingDown className="w-5 sm:w-6 h-5 sm:h-6 text-danger-500" />
               )}
               {startup.scoreTrend === 'stable' && (
-                <Minus className="w-6 h-6 text-gray-400" />
+                <Minus className="w-5 sm:w-6 h-5 sm:h-6 text-gray-400" />
               )}
             </div>
             {startup.scoreTrendDelta != null && startup.scoreTrendDelta !== 0 && (
@@ -335,7 +574,7 @@ export default function StartupDetailPage() {
 
           {/* Score breakdown bars */}
           {breakdown && (
-            <div className="flex-1 max-w-md ml-8">
+            <div className="flex-1 max-w-md lg:ml-8">
               <div className="space-y-3">
                 {(['team', 'market', 'product', 'traction', 'deal'] as const).map((key) => {
                   const category = breakdown[key];
@@ -399,30 +638,102 @@ export default function StartupDetailPage() {
             </div>
           )}
         </div>
+
+        {/* Score Analysis Summary */}
+        {startup.scoreBreakdown && (
+          <div className="mt-4 pt-4 border-t border-gray-200">
+            <div className="flex items-start gap-3">
+              <Brain className="w-5 h-5 text-primary-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-gray-900 mb-1">Score Analysis</p>
+                <p className="text-sm text-gray-600">
+                  {(() => {
+                    const score = startup.currentScore ?? 0;
+                    const breakdown = startup.scoreBreakdown as ScoreBreakdown;
+
+                    // Identify strongest and weakest areas
+                    const categories = [
+                      { name: 'Team', score: breakdown.team.base + breakdown.team.adjusted, max: 25 },
+                      { name: 'Market', score: breakdown.market.base + breakdown.market.adjusted, max: 25 },
+                      { name: 'Product', score: breakdown.product.base + breakdown.product.adjusted, max: 20 },
+                      { name: 'Traction', score: breakdown.traction.base + breakdown.traction.adjusted, max: 20 },
+                      { name: 'Deal', score: breakdown.deal.base + breakdown.deal.adjusted, max: 10 },
+                    ];
+
+                    const sortedByPercentage = [...categories].sort((a, b) => (b.score / b.max) - (a.score / a.max));
+                    const strongest = sortedByPercentage[0];
+                    const weakest = sortedByPercentage[sortedByPercentage.length - 1];
+
+                    // Generate summary
+                    const parts: string[] = [];
+
+                    // Overall assessment
+                    if (score >= 75) {
+                      parts.push(`This startup scores ${score}/100, indicating strong investment potential.`);
+                    } else if (score >= 60) {
+                      parts.push(`This startup scores ${score}/100, showing moderate promise with room for improvement.`);
+                    } else if (score >= 45) {
+                      parts.push(`This startup scores ${score}/100, suggesting it needs significant development before investment.`);
+                    } else {
+                      parts.push(`This startup scores ${score}/100, indicating high risk factors that require careful consideration.`);
+                    }
+
+                    // Strongest area
+                    const strongestPct = Math.round((strongest.score / strongest.max) * 100);
+                    parts.push(`${strongest.name} is the strongest area (${strongestPct}%)`);
+
+                    // Weakest area if significantly lower
+                    const weakestPct = Math.round((weakest.score / weakest.max) * 100);
+                    if (strongestPct - weakestPct > 20) {
+                      parts.push(`while ${weakest.name} needs attention (${weakestPct}%).`);
+                    } else {
+                      parts.push(`with balanced scores across categories.`);
+                    }
+
+                    // Communication bonus
+                    if (breakdown.communication > 2) {
+                      parts.push(`Strong founder communication adds +${breakdown.communication.toFixed(1)} points.`);
+                    } else if (breakdown.communication < -2) {
+                      parts.push(`Poor communication responsiveness deducts ${Math.abs(breakdown.communication).toFixed(1)} points.`);
+                    }
+
+                    // Red flags
+                    if (breakdown.redFlags < -3) {
+                      parts.push(`Notable red flags detected (${Math.abs(breakdown.redFlags).toFixed(1)} point penalty).`);
+                    }
+
+                    return parts.join(' ');
+                  })()}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="flex gap-8">
+      <div className="border-b border-gray-200 -mx-4 sm:mx-0 px-4 sm:px-0 overflow-x-auto">
+        <nav className="flex gap-4 sm:gap-8 min-w-max">
           {[
             { id: 'overview', label: 'Overview', icon: BarChart3 },
-            { id: 'analysis', label: 'Analysis & Reply', icon: Brain },
-            { id: 'deck', label: 'Documents', icon: FileText },
+            { id: 'analysis', label: 'Analysis', icon: Brain },
+            { id: 'research', label: 'Research', icon: Sparkles },
+            { id: 'deck', label: 'Docs', icon: FileText },
             { id: 'emails', label: 'Emails', icon: Mail },
-            { id: 'events', label: 'Score Events', icon: Clock },
+            { id: 'events', label: 'Events', icon: Clock },
           ].map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as typeof activeTab)}
               className={clsx(
-                'flex items-center gap-2 px-1 py-3 text-sm font-medium border-b-2 transition-colors',
+                'flex items-center gap-1.5 sm:gap-2 px-1 py-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px]',
                 activeTab === tab.id
                   ? 'border-primary-600 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 active:text-gray-900'
               )}
             >
               <tab.icon className="w-4 h-4" />
-              {tab.label}
+              <span className="hidden xs:inline sm:inline">{tab.label}</span>
             </button>
           ))}
         </nav>
@@ -493,9 +804,9 @@ export default function StartupDetailPage() {
           {/* Recent activity */}
           <div className="card p-5">
             <h3 className="font-semibold text-gray-900 mb-4">Recent Score Changes</h3>
-            {(scoreEvents?.events?.length ?? 0) > 0 ? (
+            {(scoreEvents?.data?.length ?? 0) > 0 ? (
               <div className="space-y-3">
-                {scoreEvents?.events.slice(0, 5).map((event: {
+                {scoreEvents?.data.slice(0, 5).map((event: {
                   id: string;
                   timestamp: string;
                   signal: string;
@@ -709,7 +1020,7 @@ export default function StartupDetailPage() {
                     <Copy className="w-4 h-4" />
                     {copiedReply ? 'Copied!' : 'Copy'}
                   </button>
-                  {startup.draftReplyStatus !== 'sent' && (
+                  {startup.draftReplyStatus !== 'sent' ? (
                     <button
                       onClick={() => sendReplyMutation.mutate()}
                       disabled={sendReplyMutation.isPending}
@@ -721,6 +1032,19 @@ export default function StartupDetailPage() {
                         <Send className="w-4 h-4" />
                       )}
                       {sendReplyMutation.isPending ? 'Sending...' : 'Send Email'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => resetDraftStatusMutation.mutate()}
+                      disabled={resetDraftStatusMutation.isPending}
+                      className="btn btn-secondary btn-sm flex items-center gap-1"
+                    >
+                      {resetDraftStatusMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
+                      {resetDraftStatusMutation.isPending ? 'Resetting...' : 'Reset to Draft'}
                     </button>
                   )}
                 </div>
@@ -769,6 +1093,987 @@ export default function StartupDetailPage() {
               </div>
             )}
           </div>
+
+          {/* Snooze / Pass Decision Section */}
+          <div className="card p-5">
+            <h3 className="font-semibold text-gray-900 mb-4">Deal Decision</h3>
+
+            {startup.status === 'snoozed' ? (
+              <div className="bg-warning-50 border border-warning-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <PauseCircle className="w-6 h-6 text-warning-600 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-warning-800">This deal is snoozed</p>
+                    {startup.snoozeReason && (
+                      <p className="text-sm text-warning-700 mt-1">
+                        <span className="font-medium">Reason:</span> {startup.snoozeReason}
+                      </p>
+                    )}
+                    {startup.snoozeFollowUpDate && (
+                      <p className="text-sm text-warning-700 mt-1 flex items-center gap-1">
+                        <Calendar className="w-4 h-4" />
+                        Follow-up scheduled for {(() => {
+                          try {
+                            // Handle both Firestore Timestamp and regular date string/Date
+                            const date = typeof startup.snoozeFollowUpDate === 'object' && 'toDate' in startup.snoozeFollowUpDate
+                              ? startup.snoozeFollowUpDate.toDate()
+                              : new Date(startup.snoozeFollowUpDate);
+                            return format(date, 'MMMM d, yyyy');
+                          } catch {
+                            return 'Date unavailable';
+                          }
+                        })()}
+                      </p>
+                    )}
+                    <button
+                      onClick={() => statusMutation.mutate({ status: 'reviewing' })}
+                      className="btn btn-secondary btn-sm mt-3"
+                    >
+                      Reactivate Deal
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : startup.status === 'passed' ? (
+              <div className="bg-danger-50 border border-danger-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <XCircle className="w-6 h-6 text-danger-600 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium text-danger-800">This deal has been passed</p>
+                    {startup.passReason && (
+                      <p className="text-sm text-danger-700 mt-1">
+                        <span className="font-medium">Reason:</span> {startup.passReason}
+                      </p>
+                    )}
+                    <button
+                      onClick={() => statusMutation.mutate({ status: 'reviewing' })}
+                      className="btn btn-secondary btn-sm mt-3"
+                    >
+                      Reactivate Deal
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row gap-4">
+                <button
+                  onClick={() => {
+                    setDecisionModalType('snooze');
+                    setDecisionReason('');
+                    setSnoozeMonths(3);
+                    setDraftDecisionEmail('');
+                    setShowEmailPreview(false);
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-warning-50 text-warning-700 border border-warning-200 rounded-lg hover:bg-warning-100 transition-colors font-medium"
+                >
+                  <PauseCircle className="w-5 h-5" />
+                  Snooze Deal
+                </button>
+                <button
+                  onClick={() => {
+                    setDecisionModalType('pass');
+                    setDecisionReason('');
+                    setDraftDecisionEmail('');
+                    setShowEmailPreview(false);
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-danger-50 text-danger-700 border border-danger-200 rounded-lg hover:bg-danger-100 transition-colors font-medium"
+                >
+                  <XCircle className="w-5 h-5" />
+                  Pass on Deal
+                </button>
+              </div>
+            )}
+
+            <p className="text-xs text-gray-500 mt-3">
+              {startup.status === 'snoozed' || startup.status === 'passed'
+                ? 'You can reactivate the deal to continue reviewing it.'
+                : 'Snoozing schedules an automatic follow-up. Passing sends a polite rejection email.'}
+            </p>
+          </div>
+
+          {/* AI Chat Section */}
+          <div className="card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-primary-600" />
+                <h3 className="font-semibold text-gray-900">AI Discussion</h3>
+              </div>
+              {chatMessages.length > 0 && (
+                <button
+                  onClick={() => {
+                    if (window.confirm('Clear all chat history for this startup?')) {
+                      clearChatMutation.mutate();
+                    }
+                  }}
+                  disabled={clearChatMutation.isPending}
+                  className="btn btn-secondary btn-sm flex items-center gap-1 text-xs"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {/* Chat Messages */}
+            <div
+              ref={chatContainerRef}
+              className="bg-gray-50 rounded-lg p-4 h-80 overflow-y-auto mb-4 space-y-4"
+            >
+              {chatMessages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                  <Bot className="w-12 h-12 mb-3 text-gray-300" />
+                  <p className="text-sm font-medium">Start a conversation about {startup.name}</p>
+                  <p className="text-xs mt-1">Ask questions, explore concerns, or discuss strategy</p>
+                </div>
+              ) : (
+                chatMessages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={clsx(
+                      'flex gap-3',
+                      msg.role === 'user' ? 'justify-end' : 'justify-start'
+                    )}
+                  >
+                    {msg.role === 'assistant' && (
+                      <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0">
+                        <Bot className="w-4 h-4 text-primary-600" />
+                      </div>
+                    )}
+                    <div
+                      className={clsx(
+                        'max-w-[80%] rounded-lg px-4 py-2',
+                        msg.role === 'user'
+                          ? 'bg-primary-600 text-white'
+                          : 'bg-white border border-gray-200 text-gray-800'
+                      )}
+                    >
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                      <p
+                        className={clsx(
+                          'text-xs mt-1',
+                          msg.role === 'user' ? 'text-primary-200' : 'text-gray-400'
+                        )}
+                      >
+                        {msg.createdAt ? format(new Date(msg.createdAt), 'h:mm a') : ''}
+                      </p>
+                    </div>
+                    {msg.role === 'user' && (
+                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
+                        <User className="w-4 h-4 text-gray-600" />
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+              {isChatLoading && (
+                <div className="flex gap-3 justify-start">
+                  <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0">
+                    <Bot className="w-4 h-4 text-primary-600" />
+                  </div>
+                  <div className="bg-white border border-gray-200 rounded-lg px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 text-primary-600 animate-spin" />
+                      <span className="text-sm text-gray-500">Thinking...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Chat Input */}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={chatMessage}
+                onChange={(e) => setChatMessage(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendChat();
+                  }
+                }}
+                placeholder="Ask about this startup..."
+                className="input flex-1"
+                disabled={isChatLoading}
+              />
+              <button
+                onClick={handleSendChat}
+                disabled={!chatMessage.trim() || isChatLoading}
+                className="btn btn-primary flex items-center gap-2"
+              >
+                {isChatLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Suggested Questions */}
+            {chatMessages.length === 0 && (
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <p className="text-xs text-gray-500 mb-2">Suggested questions:</p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    'What are the main risks?',
+                    'How does this compare to competitors?',
+                    'What due diligence should I do?',
+                    'Is the valuation reasonable?',
+                  ].map((question) => (
+                    <button
+                      key={question}
+                      onClick={() => {
+                        setChatMessage(question);
+                      }}
+                      className="text-xs px-3 py-1.5 bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors"
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Research Tab */}
+      {activeTab === 'research' && (
+        <div className="space-y-6">
+          {/* Header with refresh button */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Research & Enrichment</h2>
+              <p className="text-sm text-gray-500">Auto-enriched data from website, Crunchbase, and news sources</p>
+            </div>
+            <button
+              onClick={() => triggerEnrichmentMutation.mutate()}
+              disabled={triggerEnrichmentMutation.isPending || enrichment?.status === 'in_progress'}
+              className="btn btn-secondary flex items-center gap-2"
+            >
+              {triggerEnrichmentMutation.isPending || enrichment?.status === 'in_progress' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Enriching...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4" />
+                  Refresh Data
+                </>
+              )}
+            </button>
+          </div>
+
+          {isEnrichmentLoading ? (
+            <div className="card p-12 flex items-center justify-center">
+              <Loader2 className="w-8 h-8 text-primary-600 animate-spin" />
+            </div>
+          ) : !enrichment || enrichment.status === 'not_started' ? (
+            <div className="card p-12 text-center">
+              <Database className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-gray-900 mb-2">No Research Data Yet</h3>
+              <p className="text-sm text-gray-600 mb-6 max-w-md mx-auto">
+                Click below to automatically gather data from the startup's website, Crunchbase, and recent news articles.
+              </p>
+              <button
+                onClick={() => triggerEnrichmentMutation.mutate()}
+                disabled={triggerEnrichmentMutation.isPending}
+                className="btn btn-primary"
+              >
+                {triggerEnrichmentMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    Starting Enrichment...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    Start Enrichment
+                  </>
+                )}
+              </button>
+            </div>
+          ) : enrichment.status === 'in_progress' ? (
+            <div className="card p-12 text-center bg-primary-50">
+              <Loader2 className="w-16 h-16 text-primary-600 animate-spin mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-primary-900 mb-2">Enrichment in Progress</h3>
+              <p className="text-sm text-primary-700">Gathering data from multiple sources. This may take a minute...</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* AI Summary - Full width */}
+              {enrichment.aiSummary && (
+                <div className="lg:col-span-2 card p-6 bg-gradient-to-r from-primary-50 to-purple-50">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Brain className="w-5 h-5 text-primary-600" />
+                    <h3 className="font-semibold text-gray-900">AI Research Summary</h3>
+                  </div>
+                  <p className="text-gray-700 whitespace-pre-wrap">{enrichment.aiSummary}</p>
+                </div>
+              )}
+
+              {/* Score Impact */}
+              {enrichment.scoreImpact && (
+                <div className="lg:col-span-2 card p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <TrendUp className="w-5 h-5 text-gray-600" />
+                    <h3 className="font-semibold text-gray-900">Score Impact from Research</h3>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    {Object.entries(enrichment.scoreImpact as Record<string, number>).map(([key, value]) => (
+                      <div key={key} className="text-center p-4 bg-gray-50 rounded-lg">
+                        <p className={clsx(
+                          'text-2xl font-bold',
+                          value > 0 ? 'text-success-600' : value < 0 ? 'text-danger-600' : 'text-gray-400'
+                        )}>
+                          {value > 0 ? '+' : ''}{value}
+                        </p>
+                        <p className="text-sm text-gray-500 capitalize mt-1">{key.replace(/([A-Z])/g, ' $1').trim()}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Website Data */}
+              {enrichment.websiteData && (
+                <div className="card p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <Globe className="w-5 h-5 text-blue-600" />
+                      <h3 className="font-semibold text-gray-900">Website Data</h3>
+                    </div>
+                    {startup.website && (
+                      <a
+                        href={startup.website.startsWith('http') ? startup.website : `https://${startup.website}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-primary-600 hover:underline flex items-center gap-1"
+                      >
+                        Visit site <ExternalLink className="w-4 h-4" />
+                      </a>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    {enrichment.websiteData.companyName && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Company</p>
+                        <p className="text-gray-900">{enrichment.websiteData.companyName}</p>
+                      </div>
+                    )}
+                    {enrichment.websiteData.description && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Description</p>
+                        <p className="text-gray-900">{enrichment.websiteData.description}</p>
+                      </div>
+                    )}
+                    {enrichment.websiteData.sector && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Sector</p>
+                        <p className="text-gray-900">{enrichment.websiteData.sector}</p>
+                      </div>
+                    )}
+                    {enrichment.websiteData.productOffering && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Product</p>
+                        <p className="text-gray-900">{enrichment.websiteData.productOffering}</p>
+                      </div>
+                    )}
+                    {enrichment.websiteData.targetMarket && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Target Market</p>
+                        <p className="text-gray-900">{enrichment.websiteData.targetMarket}</p>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-3">
+                      {enrichment.websiteData.teamSize && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Team Size</p>
+                          <p className="text-gray-900">{enrichment.websiteData.teamSize}</p>
+                        </div>
+                      )}
+                      {enrichment.websiteData.foundedYear && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Founded</p>
+                          <p className="text-gray-900">{enrichment.websiteData.foundedYear}</p>
+                        </div>
+                      )}
+                    </div>
+                    {enrichment.websiteData.founders && enrichment.websiteData.founders.length > 0 && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Founders</p>
+                        <div className="space-y-2">
+                          {enrichment.websiteData.founders.map((founder: { name: string; role?: string; linkedin?: string }, idx: number) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <span className="text-gray-900">{founder.name}</span>
+                              {founder.role && <span className="text-gray-400 text-sm">({founder.role})</span>}
+                              {founder.linkedin && (
+                                <a href={founder.linkedin} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-700">
+                                  <Link className="w-4 h-4" />
+                                </a>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(enrichment.websiteData.linkedinUrl || enrichment.websiteData.twitterUrl) && (
+                      <div className="flex items-center gap-4 pt-3 border-t border-gray-200">
+                        {enrichment.websiteData.linkedinUrl && (
+                          <a
+                            href={enrichment.websiteData.linkedinUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+                          >
+                            LinkedIn <ExternalLink className="w-4 h-4" />
+                          </a>
+                        )}
+                        {enrichment.websiteData.twitterUrl && (
+                          <a
+                            href={enrichment.websiteData.twitterUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+                          >
+                            Twitter <ExternalLink className="w-4 h-4" />
+                          </a>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Crunchbase / AI Research Data */}
+              {enrichment.crunchbaseData && (
+                <div className="card p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Database className="w-5 h-5 text-orange-600" />
+                    <h3 className="font-semibold text-gray-900">
+                      {enrichment.crunchbaseData.source === 'ai_research' ? 'AI Research Data' : 'Crunchbase Data'}
+                    </h3>
+                    {enrichment.crunchbaseData.source === 'ai_research' && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">AI Generated</span>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    {enrichment.crunchbaseData.shortDescription && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Description</p>
+                        <p className="text-gray-900">{enrichment.crunchbaseData.shortDescription}</p>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-3">
+                      {enrichment.crunchbaseData.totalFundingUsd && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Funding</p>
+                          <p className="text-gray-900 font-medium">${(enrichment.crunchbaseData.totalFundingUsd / 1000000).toFixed(1)}M</p>
+                        </div>
+                      )}
+                      {enrichment.crunchbaseData.lastFundingType && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Last Round</p>
+                          <p className="text-gray-900">{enrichment.crunchbaseData.lastFundingType}</p>
+                        </div>
+                      )}
+                      {enrichment.crunchbaseData.numEmployeesEnum && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Employees</p>
+                          <p className="text-gray-900">{enrichment.crunchbaseData.numEmployeesEnum}</p>
+                        </div>
+                      )}
+                      {enrichment.crunchbaseData.foundedOn && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Founded</p>
+                          <p className="text-gray-900">{enrichment.crunchbaseData.foundedOn}</p>
+                        </div>
+                      )}
+                    </div>
+                    {enrichment.crunchbaseData.categories && enrichment.crunchbaseData.categories.length > 0 && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Categories</p>
+                        <div className="flex flex-wrap gap-1">
+                          {enrichment.crunchbaseData.categories.map((cat: string, idx: number) => (
+                            <span key={idx} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">{cat}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {enrichment.crunchbaseData.investors && enrichment.crunchbaseData.investors.length > 0 && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Investors</p>
+                        <div className="flex flex-wrap gap-1">
+                          {enrichment.crunchbaseData.investors.map((investor: string, idx: number) => (
+                            <span key={idx} className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded-full">{investor}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* LinkedIn Company Data */}
+              {enrichment.linkedinData && (
+                <div className="card p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Link className="w-5 h-5 text-blue-600" />
+                    <h3 className="font-semibold text-gray-900">LinkedIn Company</h3>
+                    {enrichment.linkedinData.source === 'ai_research' && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">AI Research</span>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    {enrichment.linkedinData.tagline && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">Tagline</p>
+                        <p className="text-gray-900 italic">"{enrichment.linkedinData.tagline}"</p>
+                      </div>
+                    )}
+                    {enrichment.linkedinData.description && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">About</p>
+                        <p className="text-gray-900">{enrichment.linkedinData.description}</p>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-3">
+                      {enrichment.linkedinData.industry && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Industry</p>
+                          <p className="text-gray-900">{enrichment.linkedinData.industry}</p>
+                        </div>
+                      )}
+                      {enrichment.linkedinData.companySize && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Company Size</p>
+                          <p className="text-gray-900">{enrichment.linkedinData.companySize}</p>
+                        </div>
+                      )}
+                      {enrichment.linkedinData.headquarters && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Headquarters</p>
+                          <p className="text-gray-900">{enrichment.linkedinData.headquarters}</p>
+                        </div>
+                      )}
+                      {enrichment.linkedinData.foundedYear && (
+                        <div>
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">Founded</p>
+                          <p className="text-gray-900">{enrichment.linkedinData.foundedYear}</p>
+                        </div>
+                      )}
+                    </div>
+                    {enrichment.linkedinData.specialties && enrichment.linkedinData.specialties.length > 0 && (
+                      <div>
+                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Specialties</p>
+                        <div className="flex flex-wrap gap-1">
+                          {enrichment.linkedinData.specialties.map((specialty: string, idx: number) => (
+                            <span key={idx} className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-full">{specialty}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {enrichment.linkedinData.companyUrl && (
+                      <div className="pt-3 border-t border-gray-200">
+                        <a
+                          href={enrichment.linkedinData.companyUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+                        >
+                          View on LinkedIn <ExternalLink className="w-4 h-4" />
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Founders & Team - Full width */}
+              {enrichment.foundersData && enrichment.foundersData.length > 0 && (
+                <div className="lg:col-span-2 card p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Users className="w-5 h-5 text-indigo-600" />
+                    <h3 className="font-semibold text-gray-900">Founders & Key Team</h3>
+                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{enrichment.foundersData.length} people</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {enrichment.foundersData.map((founder: {
+                      name: string;
+                      linkedInUrl?: string;
+                      currentRole?: string;
+                      headline?: string;
+                      location?: string;
+                      previousCompanies?: Array<{ name: string; role: string; duration?: string }>;
+                      education?: Array<{ school: string; degree?: string; field?: string }>;
+                      skills?: string[];
+                      yearsExperience?: number;
+                    }, idx: number) => (
+                      <div key={idx} className="bg-gray-50 rounded-lg p-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <div>
+                            <p className="font-medium text-gray-900">{founder.name}</p>
+                            {founder.currentRole && (
+                              <p className="text-sm text-primary-600">{founder.currentRole}</p>
+                            )}
+                          </div>
+                          {founder.linkedInUrl && (
+                            <a
+                              href={founder.linkedInUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:text-blue-700"
+                            >
+                              <Link className="w-4 h-4" />
+                            </a>
+                          )}
+                        </div>
+                        {founder.headline && (
+                          <p className="text-xs text-gray-500 mb-2 line-clamp-2">{founder.headline}</p>
+                        )}
+                        <div className="space-y-2 text-xs">
+                          {founder.location && (
+                            <p className="text-gray-600">📍 {founder.location}</p>
+                          )}
+                          {founder.yearsExperience && (
+                            <p className="text-gray-600">💼 {founder.yearsExperience}+ years experience</p>
+                          )}
+                          {founder.previousCompanies && founder.previousCompanies.length > 0 && (
+                            <div>
+                              <p className="text-gray-500 font-medium mb-1">Previous:</p>
+                              <div className="space-y-0.5">
+                                {founder.previousCompanies.slice(0, 2).map((company, cidx: number) => (
+                                  <p key={cidx} className="text-gray-600">
+                                    {company.role} @ {company.name}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {founder.education && founder.education.length > 0 && (
+                            <div>
+                              <p className="text-gray-500 font-medium mb-1">Education:</p>
+                              <div className="space-y-0.5">
+                                {founder.education.slice(0, 2).map((edu, eidx: number) => (
+                                  <p key={eidx} className="text-gray-600">
+                                    {edu.school}{edu.degree ? `, ${edu.degree}` : ''}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {founder.skills && founder.skills.length > 0 && (
+                            <div className="flex flex-wrap gap-1 pt-1">
+                              {founder.skills.slice(0, 4).map((skill: string, sidx: number) => (
+                                <span key={sidx} className="text-[10px] bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">{skill}</span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* News Articles - Full width */}
+              {enrichment.newsArticles && enrichment.newsArticles.length > 0 && (
+                <div className="lg:col-span-2 card p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Newspaper className="w-5 h-5 text-green-600" />
+                    <h3 className="font-semibold text-gray-900">Recent News</h3>
+                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{enrichment.newsArticles.length} articles</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {enrichment.newsArticles.slice(0, 6).map((article: { title: string; url: string; source: string; publishedAt?: string }, idx: number) => (
+                      <a
+                        key={idx}
+                        href={article.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                      >
+                        <p className="text-gray-900 font-medium hover:text-primary-600 line-clamp-2">{article.title}</p>
+                        <div className="flex items-center gap-2 mt-2">
+                          <span className="text-xs text-gray-500">{article.source}</span>
+                          {article.publishedAt && (
+                            <>
+                              <span className="text-gray-300">•</span>
+                              <span className="text-xs text-gray-500">
+                                {(() => {
+                                  try {
+                                    return format(new Date(article.publishedAt), 'MMM d, yyyy');
+                                  } catch {
+                                    return '';
+                                  }
+                                })()}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Last Updated */}
+              {enrichment.enrichedAt && (
+                <div className="lg:col-span-2 text-right">
+                  <p className="text-sm text-gray-400">
+                    Last updated: {(() => {
+                      try {
+                        return format(new Date(enrichment.enrichedAt), 'MMMM d, yyyy \'at\' h:mm a');
+                      } catch {
+                        return 'Unknown';
+                      }
+                    })()}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Snooze/Pass Decision Modal */}
+      {decisionModalType && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-5 border-b border-gray-200">
+              <div className="flex items-center gap-3">
+                {decisionModalType === 'snooze' ? (
+                  <div className="w-10 h-10 rounded-full bg-warning-100 flex items-center justify-center">
+                    <PauseCircle className="w-5 h-5 text-warning-600" />
+                  </div>
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-danger-100 flex items-center justify-center">
+                    <XCircle className="w-5 h-5 text-danger-600" />
+                  </div>
+                )}
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {decisionModalType === 'snooze' ? 'Snooze Deal' : 'Pass on Deal'}
+                  </h3>
+                  <p className="text-sm text-gray-500">{startup.name}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setDecisionModalType(null);
+                  setDecisionReason('');
+                  setDraftDecisionEmail('');
+                  setShowEmailPreview(false);
+                }}
+                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              {!showEmailPreview ? (
+                <>
+                  {/* Reason input */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      {decisionModalType === 'snooze'
+                        ? 'Why are you snoozing this deal?'
+                        : 'Why are you passing on this deal?'}
+                    </label>
+                    <textarea
+                      value={decisionReason}
+                      onChange={(e) => setDecisionReason(e.target.value)}
+                      className="input min-h-[120px] resize-y"
+                      placeholder={decisionModalType === 'snooze'
+                        ? 'e.g., Too early stage, need to see more traction, timing not right...'
+                        : 'e.g., Not a fit for our thesis, market concerns, team concerns...'}
+                    />
+                  </div>
+
+                  {/* Snooze duration selector */}
+                  {decisionModalType === 'snooze' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Follow-up in
+                      </label>
+                      <div className="flex gap-2">
+                        {[1, 3, 6, 12].map((months) => (
+                          <button
+                            key={months}
+                            onClick={() => setSnoozeMonths(months)}
+                            className={clsx(
+                              'flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors',
+                              snoozeMonths === months
+                                ? 'bg-warning-100 border-warning-500 text-warning-700'
+                                : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                            )}
+                          >
+                            {months} {months === 1 ? 'month' : 'months'}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        The founder will be asked to send progress updates. You'll be alerted when updates come in.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Info box */}
+                  <div className={clsx(
+                    'rounded-lg p-4',
+                    decisionModalType === 'snooze' ? 'bg-warning-50' : 'bg-danger-50'
+                  )}>
+                    <p className={clsx(
+                      'text-sm',
+                      decisionModalType === 'snooze' ? 'text-warning-800' : 'text-danger-800'
+                    )}>
+                      {decisionModalType === 'snooze' ? (
+                        <>
+                          <strong>What happens next:</strong>
+                          <ul className="mt-2 space-y-1 list-disc list-inside">
+                            <li>AI will draft a polite email explaining you're putting the deal on hold</li>
+                            <li>The founder will be encouraged to send progress updates</li>
+                            <li>A reminder will be scheduled for {snoozeMonths} months from now</li>
+                            <li>You'll be alerted when the founder sends updates</li>
+                          </ul>
+                        </>
+                      ) : (
+                        <>
+                          <strong>What happens next:</strong>
+                          <ul className="mt-2 space-y-1 list-disc list-inside">
+                            <li>AI will draft a professional rejection email</li>
+                            <li>You can review and edit the email before sending</li>
+                            <li>The deal will be marked as "Passed"</li>
+                          </ul>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Email preview and edit */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-sm font-medium text-gray-700">
+                        Draft Email to Founder
+                      </label>
+                      <span className="text-xs text-gray-500">You can edit before sending</span>
+                    </div>
+                    <textarea
+                      value={draftDecisionEmail}
+                      onChange={(e) => setDraftDecisionEmail(e.target.value)}
+                      className="input min-h-[300px] resize-y font-mono text-sm"
+                    />
+                  </div>
+
+                  <div className="bg-gray-50 rounded-lg p-3 flex items-start gap-2">
+                    <Mail className="w-4 h-4 text-gray-500 mt-0.5 flex-shrink-0" />
+                    <div className="text-sm text-gray-600">
+                      <p>
+                        <strong>To:</strong> {startup.founderEmail || 'Founder email not found'}
+                      </p>
+                      <p>
+                        <strong>Subject:</strong> Re: {startup.name}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex justify-between items-center gap-3 p-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+              {showEmailPreview && (
+                <button
+                  onClick={() => setShowEmailPreview(false)}
+                  className="btn btn-secondary flex items-center gap-1"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back
+                </button>
+              )}
+              <div className="flex gap-3 ml-auto">
+                <button
+                  onClick={() => {
+                    setDecisionModalType(null);
+                    setDecisionReason('');
+                    setDraftDecisionEmail('');
+                    setShowEmailPreview(false);
+                  }}
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                {!showEmailPreview ? (
+                  <button
+                    onClick={() => {
+                      if (!decisionReason.trim()) {
+                        toast.error('Please provide a reason');
+                        return;
+                      }
+                      setIsGeneratingEmail(true);
+                      if (decisionModalType === 'snooze') {
+                        snoozeMutation.mutate({ reason: decisionReason, followUpMonths: snoozeMonths });
+                      } else {
+                        passMutation.mutate(decisionReason);
+                      }
+                    }}
+                    disabled={isGeneratingEmail || !decisionReason.trim()}
+                    className={clsx(
+                      'btn flex items-center gap-2',
+                      decisionModalType === 'snooze'
+                        ? 'bg-warning-600 text-white hover:bg-warning-700'
+                        : 'bg-danger-600 text-white hover:bg-danger-700'
+                    )}
+                  >
+                    {isGeneratingEmail ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Generating Email...
+                      </>
+                    ) : (
+                      <>
+                        <Brain className="w-4 h-4" />
+                        Generate Email with AI
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (!draftDecisionEmail.trim()) {
+                        toast.error('Email content is required');
+                        return;
+                      }
+                      sendDecisionEmailMutation.mutate({
+                        emailBody: draftDecisionEmail,
+                        emailSubject: `Re: ${startup.name}`,
+                      });
+                    }}
+                    disabled={sendDecisionEmailMutation.isPending}
+                    className="btn btn-primary flex items-center gap-2"
+                  >
+                    {sendDecisionEmailMutation.isPending ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Sending...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        Send Email
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -779,23 +2084,64 @@ export default function StartupDetailPage() {
             <div className="card p-5">
               <h3 className="font-semibold text-gray-900 mb-4">Uploaded Documents</h3>
               <div className="space-y-3">
-                {decks.map((deck: { id: string; fileName: string; fileSize: number; createdAt: string; aiAnalysis?: { score?: number } }) => (
+                {decks.map((deck: { id: string; fileName: string; fileSize: number; fileUrl?: string; storagePath?: string; createdAt: string; status?: string; aiAnalysis?: { score?: number } }) => (
                   <div key={deck.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <div className="flex items-center gap-3">
+                    <button
+                      onClick={async () => {
+                        try {
+                          const response = await fetch(
+                            `${import.meta.env.VITE_API_URL || '/api'}/decks/${deck.id}/download`,
+                            {
+                              headers: {
+                                Authorization: `Bearer ${useAuthStore.getState().tokens?.accessToken}`,
+                              },
+                            }
+                          );
+                          if (!response.ok) throw new Error('Download failed');
+                          const blob = await response.blob();
+                          const url = URL.createObjectURL(blob);
+                          window.open(url, '_blank');
+                        } catch {
+                          toast.error('Failed to open document');
+                        }
+                      }}
+                      className="flex items-center gap-3 flex-1 hover:opacity-80 transition-opacity cursor-pointer text-left"
+                    >
                       <FileText className="w-8 h-8 text-primary-600" />
                       <div>
-                        <p className="font-medium text-gray-900">{deck.fileName}</p>
+                        <p className="font-medium text-gray-900 hover:text-primary-600">{deck.fileName}</p>
                         <p className="text-sm text-gray-500">
                           {(deck.fileSize / 1024).toFixed(1)} KB · Uploaded {format(new Date(deck.createdAt), 'MMM d, yyyy')}
+                          {deck.status === 'uploaded' && !deck.aiAnalysis && ' · Pending analysis'}
                         </p>
                       </div>
+                    </button>
+                    <div className="flex items-center gap-3">
+                      {deck.aiAnalysis?.score !== undefined ? (
+                        <div className="text-right">
+                          <span className="text-lg font-bold text-primary-600">{deck.aiAnalysis.score}</span>
+                          <span className="text-sm text-gray-500">/100</span>
+                        </div>
+                      ) : analyzingDeckId === deck.id ? (
+                        <div className="flex items-center gap-2 text-primary-600">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span className="text-xs">Analyzing...</span>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setAnalyzingDeckId(deck.id);
+                            setAnalyzingDeckName(deck.fileName);
+                            reprocessDeckMutation.mutate(deck.id);
+                          }}
+                          disabled={reprocessDeckMutation.isPending || analyzingDeckId !== null}
+                          className="text-xs px-2 py-1 bg-primary-100 text-primary-700 rounded hover:bg-primary-200 transition-colors disabled:opacity-50"
+                          title="Analyze this document with AI"
+                        >
+                          Analyze
+                        </button>
+                      )}
                     </div>
-                    {deck.aiAnalysis?.score !== undefined && (
-                      <div className="text-right">
-                        <span className="text-lg font-bold text-primary-600">{deck.aiAnalysis.score}</span>
-                        <span className="text-sm text-gray-500">/100</span>
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -827,6 +2173,31 @@ export default function StartupDetailPage() {
                 <p className="text-sm text-gray-500 mt-1">Drag & drop or click to browse (PDF)</p>
               </>
             )}
+          </div>
+
+          {/* Rescan from original email */}
+          <div className="card p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Mail className="w-5 h-5 text-gray-400" />
+                <div>
+                  <p className="text-sm font-medium text-gray-700">Missing attachments from original email?</p>
+                  <p className="text-xs text-gray-500">Re-fetch attachments from the original proposal email</p>
+                </div>
+              </div>
+              <button
+                onClick={() => rescanAttachmentsMutation.mutate()}
+                disabled={rescanAttachmentsMutation.isPending}
+                className="btn-secondary text-sm flex items-center gap-2"
+              >
+                {rescanAttachmentsMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+                Rescan from Email
+              </button>
+            </div>
           </div>
 
           {/* Latest deck analysis */}
@@ -890,17 +2261,36 @@ export default function StartupDetailPage() {
 
       {activeTab === 'emails' && (
         <>
+          {/* Compose Email Button */}
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold text-gray-900">Email Thread</h3>
+            <button
+              onClick={() => {
+                setIsComposingEmail(true);
+                setReplyToEmail(null);
+                setComposeSubject(`Re: ${startup.name}`);
+                setComposeBody('');
+              }}
+              className="btn btn-primary btn-sm flex items-center gap-2"
+            >
+              <Send className="w-4 h-4" />
+              Compose Email
+            </button>
+          </div>
+
           <div className="card">
             {(emails?.data?.length ?? 0) > 0 ? (
               <div className="divide-y divide-gray-200">
                 {emails?.data.map((email: Email) => (
                   <div
                     key={email.id}
-                    className="p-4 hover:bg-gray-50 cursor-pointer transition-colors"
-                    onClick={() => setSelectedEmail(email)}
+                    className="p-4 hover:bg-gray-50 transition-colors"
                   >
                     <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-3">
+                      <div
+                        className="flex items-start gap-3 flex-1 cursor-pointer"
+                        onClick={() => setSelectedEmail(email)}
+                      >
                         <div className={clsx(
                           'mt-1 w-8 h-8 rounded-full flex items-center justify-center',
                           email.direction === 'inbound' ? 'bg-primary-100' : 'bg-success-100'
@@ -921,19 +2311,42 @@ export default function StartupDetailPage() {
                           </p>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <span className={clsx(
-                          'badge text-xs mb-1',
-                          email.direction === 'inbound' ? 'bg-primary-100 text-primary-700' : 'bg-success-100 text-success-700'
-                        )}>
-                          {email.direction === 'inbound' ? 'Received' : 'Sent'}
-                        </span>
-                        <p className="text-sm text-gray-500">
-                          {format(new Date(email.receivedAt), 'MMM d, yyyy h:mm a')}
-                        </p>
+                      <div className="flex items-start gap-3">
+                        <div className="text-right">
+                          <span className={clsx(
+                            'badge text-xs mb-1',
+                            email.direction === 'inbound' ? 'bg-primary-100 text-primary-700' : 'bg-success-100 text-success-700'
+                          )}>
+                            {email.direction === 'inbound' ? 'Received' : 'Sent'}
+                          </span>
+                          <p className="text-sm text-gray-500">
+                            {format(new Date(email.receivedAt), 'MMM d, yyyy h:mm a')}
+                          </p>
+                        </div>
+                        {email.direction === 'inbound' && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsComposingEmail(true);
+                              setReplyToEmail(email);
+                              setComposeSubject(`Re: ${email.subject}`);
+                              setComposeBody('');
+                            }}
+                            className="btn btn-secondary btn-sm flex items-center gap-1"
+                            title="Reply to this email"
+                          >
+                            <Send className="w-3 h-3" />
+                            Reply
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <p className="text-sm text-gray-600 mt-2 ml-11 line-clamp-2">{email.bodyPreview}</p>
+                    <p
+                      className="text-sm text-gray-600 mt-2 ml-11 line-clamp-2 cursor-pointer"
+                      onClick={() => setSelectedEmail(email)}
+                    >
+                      {email.bodyPreview}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -942,6 +2355,18 @@ export default function StartupDetailPage() {
                 <Mail className="w-12 h-12 mx-auto text-gray-400 mb-4" />
                 <p className="text-gray-600">No emails synced yet.</p>
                 <p className="text-sm text-gray-500 mt-1">Connect your email in Settings to sync communications.</p>
+                <button
+                  onClick={() => {
+                    setIsComposingEmail(true);
+                    setReplyToEmail(null);
+                    setComposeSubject(`Re: ${startup.name}`);
+                    setComposeBody('');
+                  }}
+                  className="btn btn-primary mt-4"
+                >
+                  <Send className="w-4 h-4 mr-2" />
+                  Send First Email
+                </button>
               </div>
             )}
           </div>
@@ -1003,6 +2428,21 @@ export default function StartupDetailPage() {
 
                 {/* Modal Footer */}
                 <div className="flex justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+                  {selectedEmail.direction === 'inbound' && (
+                    <button
+                      onClick={() => {
+                        setSelectedEmail(null);
+                        setIsComposingEmail(true);
+                        setReplyToEmail(selectedEmail);
+                        setComposeSubject(`Re: ${selectedEmail.subject}`);
+                        setComposeBody('');
+                      }}
+                      className="btn btn-primary flex items-center gap-2"
+                    >
+                      <Send className="w-4 h-4" />
+                      Reply
+                    </button>
+                  )}
                   <button
                     onClick={() => setSelectedEmail(null)}
                     className="btn btn-secondary"
@@ -1013,22 +2453,124 @@ export default function StartupDetailPage() {
               </div>
             </div>
           )}
+
+          {/* Compose Email Modal */}
+          {isComposingEmail && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col">
+                {/* Modal Header */}
+                <div className="flex items-center justify-between p-5 border-b border-gray-200">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {replyToEmail ? 'Reply to Email' : 'Compose Email'}
+                  </h3>
+                  <button
+                    onClick={() => {
+                      setIsComposingEmail(false);
+                      setReplyToEmail(null);
+                    }}
+                    className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Modal Body */}
+                <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                  {/* To field */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
+                    <input
+                      type="text"
+                      value={startup.founderEmail || ''}
+                      disabled
+                      className="input bg-gray-50"
+                    />
+                  </div>
+
+                  {/* Subject */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                    <input
+                      type="text"
+                      value={composeSubject}
+                      onChange={(e) => setComposeSubject(e.target.value)}
+                      className="input"
+                      placeholder="Enter subject..."
+                    />
+                  </div>
+
+                  {/* Reply context */}
+                  {replyToEmail && (
+                    <div className="bg-gray-50 rounded-lg p-3 border-l-4 border-primary-500">
+                      <p className="text-xs text-gray-500 mb-1">Replying to:</p>
+                      <p className="text-sm text-gray-700 line-clamp-3">{replyToEmail.bodyPreview}</p>
+                    </div>
+                  )}
+
+                  {/* Body */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
+                    <textarea
+                      value={composeBody}
+                      onChange={(e) => setComposeBody(e.target.value)}
+                      className="input min-h-[200px] resize-y"
+                      placeholder="Write your message..."
+                    />
+                  </div>
+                </div>
+
+                {/* Modal Footer */}
+                <div className="flex justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+                  <button
+                    onClick={() => {
+                      setIsComposingEmail(false);
+                      setReplyToEmail(null);
+                    }}
+                    className="btn btn-secondary"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!composeSubject.trim() || !composeBody.trim()) {
+                        toast.error('Please fill in subject and message');
+                        return;
+                      }
+                      composeEmailMutation.mutate({
+                        subject: composeSubject,
+                        body: composeBody,
+                        replyToEmailId: replyToEmail?.id,
+                      });
+                    }}
+                    disabled={composeEmailMutation.isPending}
+                    className="btn btn-primary flex items-center gap-2"
+                  >
+                    {composeEmailMutation.isPending ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
+                    {composeEmailMutation.isPending ? 'Sending...' : 'Send Email'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
 
       {activeTab === 'events' && (
         <div className="card">
-          {(scoreEvents?.events?.length ?? 0) > 0 ? (
+          {(scoreEvents?.data?.length ?? 0) > 0 ? (
             <div className="divide-y divide-gray-200">
-              {scoreEvents?.events.map((event: {
+              {scoreEvents?.data.map((event: {
                 id: string;
-                timestamp: string;
+                createdAt: string;
                 signal: string;
                 impact: number;
                 category: string;
                 source: string;
                 evidence: string;
-                confidence: number;
               }) => (
                 <div key={event.id} className="p-4">
                   <div className="flex items-start justify-between">
@@ -1063,13 +2605,10 @@ export default function StartupDetailPage() {
                           event.impact > 0 ? 'text-success-600' : 'text-danger-600'
                         )}
                       >
-                        {event.impact > 0 ? '+' : ''}{event.impact.toFixed(1)}
+                        {event.impact > 0 ? '+' : ''}{event.impact}
                       </span>
-                      <p className="text-xs text-gray-500">
-                        {(event.confidence * 100).toFixed(0)}% confidence
-                      </p>
                       <p className="text-xs text-gray-500 mt-1">
-                        {format(new Date(event.timestamp), 'MMM d, yyyy h:mm a')}
+                        {event.createdAt ? format(new Date(event.createdAt), 'MMM d, yyyy h:mm a') : 'N/A'}
                       </p>
                     </div>
                   </div>
@@ -1081,10 +2620,78 @@ export default function StartupDetailPage() {
               <Clock className="w-12 h-12 mx-auto text-gray-400 mb-4" />
               <p className="text-gray-600">No score events yet.</p>
               <p className="text-sm text-gray-500 mt-1">
-                Upload a deck or sync emails to start tracking signals.
+                Score events track signals that affect the investment score.
               </p>
+              <button
+                onClick={() => generateScoreEventsMutation.mutate()}
+                disabled={generateScoreEventsMutation.isPending}
+                className="btn btn-primary mt-4 inline-flex items-center gap-2"
+              >
+                {generateScoreEventsMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+                {generateScoreEventsMutation.isPending ? 'Generating...' : 'Generate Score Events'}
+              </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Document Analysis Progress Modal */}
+      {analyzingDeckId && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4">
+            <div className="text-center">
+              {/* Animated icon */}
+              <div className="mx-auto w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mb-4">
+                <Brain className="w-8 h-8 text-primary-600 animate-pulse" />
+              </div>
+
+              <h3 className="text-xl font-bold text-gray-900 mb-2">
+                Analyzing Document
+              </h3>
+
+              <p className="text-gray-600 mb-2">
+                {analyzingDeckName}
+              </p>
+
+              <p className="text-sm text-gray-500 mb-6">
+                AI is extracting insights and generating a score...
+              </p>
+
+              {/* Progress steps */}
+              <div className="space-y-3 mb-6 text-left">
+                <div className="flex items-center gap-3 p-3 bg-primary-50 rounded-lg">
+                  <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
+                  <span className="text-sm text-primary-700">Extracting text from document</span>
+                </div>
+                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg opacity-60">
+                  <FileText className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-500">Analyzing business model & market</span>
+                </div>
+                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg opacity-60">
+                  <BarChart3 className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-500">Generating investment score</span>
+                </div>
+              </div>
+
+              {/* Loading bar */}
+              <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary-500 rounded-full transition-all duration-1000"
+                  style={{
+                    width: '60%',
+                    animation: 'progress 2s ease-in-out infinite'
+                  }}
+                />
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                This typically takes 10-30 seconds
+              </p>
+            </div>
+          </div>
         </div>
       )}
     </div>

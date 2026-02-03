@@ -26,6 +26,7 @@ import {
   Brain,
   Filter,
   Pause,
+  Target,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -77,6 +78,7 @@ const statusConfig: Record<string, { label: string; color: string }> = {
   reviewing: { label: 'Reviewing', color: 'bg-blue-100 text-blue-700' },
   due_diligence: { label: 'Due Diligence', color: 'bg-yellow-100 text-yellow-700' },
   invested: { label: 'Invested', color: 'bg-green-100 text-green-700' },
+  snoozed: { label: 'Snoozed', color: 'bg-orange-100 text-orange-700' },
   passed: { label: 'Passed', color: 'bg-gray-100 text-gray-700' },
   archived: { label: 'Archived', color: 'bg-gray-100 text-gray-500' },
 };
@@ -97,6 +99,8 @@ export default function DashboardPage() {
   const [scanStep, setScanStep] = useState(0);
   const [scanStartTime, setScanStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [processingProposalId, setProcessingProposalId] = useState<string | null>(null);
+  const [processingProposalName, setProcessingProposalName] = useState<string | null>(null);
 
   const { data: counts } = useQuery({
     queryKey: ['startup-counts'],
@@ -104,8 +108,8 @@ export default function DashboardPage() {
   });
 
   const { data: startups } = useQuery({
-    queryKey: ['startups', { sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10 }],
-    queryFn: () => startupsApi.list({ sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10 }),
+    queryKey: ['startups', { sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10, excludeStatus: 'passed' }],
+    queryFn: () => startupsApi.list({ sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10, excludeStatus: 'passed' }),
   });
 
   // Fetch proposal queue
@@ -181,13 +185,17 @@ export default function DashboardPage() {
 
   const approveMutation = useMutation({
     mutationFn: inboxApi.approveProposal,
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setProcessingProposalId(null);
+      setProcessingProposalName(null);
       queryClient.invalidateQueries({ queryKey: ['proposal-queue'] });
       queryClient.invalidateQueries({ queryKey: ['startups'] });
       queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
-      toast.success('Proposal approved! Startup has been added.');
+      toast.success(`Startup approved with score ${data.score || 'N/A'}!`);
     },
     onError: (error: Error) => {
+      setProcessingProposalId(null);
+      setProcessingProposalName(null);
       toast.error(error.message || 'Failed to approve proposal');
     },
   });
@@ -223,34 +231,34 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-gray-600">Track your startup investment pipeline</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-sm sm:text-base text-gray-600">Track your startup investment pipeline</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => syncMutation.mutate()}
             disabled={syncMutation.isPending}
-            className="btn-secondary flex items-center"
+            className="btn-secondary flex items-center flex-1 sm:flex-none justify-center min-h-[44px]"
           >
             {syncMutation.isPending ? (
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              <Loader2 className="w-4 h-4 sm:mr-2 animate-spin" />
             ) : (
-              <Mail className="w-4 h-4 mr-2" />
+              <Mail className="w-4 h-4 sm:mr-2" />
             )}
-            {syncMutation.isPending ? 'Checking...' : 'Check Emails'}
+            <span className="hidden sm:inline">{syncMutation.isPending ? 'Checking...' : 'Check Emails'}</span>
           </button>
-          <Link to="/startups" className="btn-primary">
-            <Upload className="w-4 h-4 mr-2" />
-            Add Startup
+          <Link to="/startups" className="btn-primary flex-1 sm:flex-none justify-center min-h-[44px]">
+            <Upload className="w-4 h-4 sm:mr-2" />
+            <span className="hidden sm:inline">Add Startup</span>
           </Link>
         </div>
       </div>
 
       {/* Pipeline Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {(['reviewing', 'due_diligence', 'invested', 'passed'] as DealStatus[]).map((status) => {
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
+        {(['reviewing', 'due_diligence', 'invested', 'snoozed', 'passed'] as DealStatus[]).map((status) => {
           const config = statusConfig[status];
           const count = counts?.[status] ?? 0;
 
@@ -258,16 +266,16 @@ export default function DashboardPage() {
             <Link
               key={status}
               to={`/startups?status=${status}`}
-              className="card p-5 hover:shadow-md transition-shadow"
+              className="card p-3 sm:p-5 hover:shadow-md transition-shadow active:bg-gray-50"
             >
               <div className="flex items-center justify-between">
-                <span className={clsx('badge', config.color)}>
+                <span className={clsx('badge text-xs', config.color)}>
                   {config.label}
                 </span>
-                <ArrowRight className="w-4 h-4 text-gray-400" />
+                <ArrowRight className="w-4 h-4 text-gray-400 hidden sm:block" />
               </div>
-              <p className="mt-3 text-3xl font-bold text-gray-900">{count}</p>
-              <p className="text-sm text-gray-500">
+              <p className="mt-2 sm:mt-3 text-2xl sm:text-3xl font-bold text-gray-900">{count}</p>
+              <p className="text-xs sm:text-sm text-gray-500">
                 {count === 1 ? 'startup' : 'startups'}
               </p>
             </Link>
@@ -297,30 +305,36 @@ export default function DashboardPage() {
 
           <div className="divide-y divide-gray-200">
             {proposalQueue.map((proposal) => (
-              <div key={proposal.id} className="p-5">
-                <div className="flex items-start justify-between gap-4">
+              <div key={proposal.id} className="p-4 sm:p-5">
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     {/* Startup name and confidence */}
-                    <div className="flex items-center gap-3 mb-2">
-                      <h3 className="text-lg font-semibold text-gray-900">
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-2">
+                      <h3 className="text-base sm:text-lg font-semibold text-gray-900">
                         {proposal.startupName}
                       </h3>
-                      <span
-                        className={clsx(
-                          'px-2 py-0.5 rounded text-xs font-medium',
-                          proposal.confidence >= 0.8
-                            ? 'bg-green-100 text-green-700'
-                            : proposal.confidence >= 0.6
-                            ? 'bg-yellow-100 text-yellow-700'
-                            : 'bg-orange-100 text-orange-700'
-                        )}
-                      >
-                        {Math.round(proposal.confidence * 100)}% confidence
-                      </span>
+                      {(() => {
+                        // Normalize confidence: if <= 1, it's a decimal (0.95 = 95%), otherwise it's already a percentage
+                        const confidencePercent = proposal.confidence <= 1 ? proposal.confidence * 100 : proposal.confidence;
+                        return (
+                          <span
+                            className={clsx(
+                              'px-2 py-0.5 rounded text-xs font-medium',
+                              confidencePercent >= 80
+                                ? 'bg-green-100 text-green-700'
+                                : confidencePercent >= 60
+                                ? 'bg-yellow-100 text-yellow-700'
+                                : 'bg-orange-100 text-orange-700'
+                            )}
+                          >
+                            {Math.round(confidencePercent)}%
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     {/* Key info */}
-                    <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600 mb-2">
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-sm text-gray-600 mb-2">
                       {proposal.website && (
                         <a
                           href={proposal.website.startsWith('http') ? proposal.website : `https://${proposal.website}`}
@@ -379,31 +393,44 @@ export default function DashboardPage() {
                   </div>
 
                   {/* Action buttons */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => rejectMutation.mutate(proposal.id)}
-                      disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
-                      className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                      title="Reject - sends polite decline email"
-                    >
-                      <X className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => snoozeMutation.mutate(proposal.id)}
-                      disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
-                      className="p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
-                      title="Snooze - asks founder to share progress"
-                    >
-                      <Pause className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => approveMutation.mutate(proposal.id)}
-                      disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
-                      className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                      title="Approve - add to evaluation"
-                    >
-                      <Check className="w-5 h-5" />
-                    </button>
+                  <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0 mt-3 sm:mt-0">
+                    {processingProposalId === proposal.id ? (
+                      <div className="flex items-center gap-2 px-3 py-2 bg-primary-50 rounded-lg">
+                        <Loader2 className="w-4 h-4 text-primary-600 animate-spin" />
+                        <span className="text-sm text-primary-700">Processing...</span>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => rejectMutation.mutate(proposal.id)}
+                          disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
+                          className="p-3 text-red-600 hover:bg-red-50 active:bg-red-100 rounded-lg transition-colors disabled:opacity-50 min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Reject - sends polite decline email"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                        <button
+                          onClick={() => snoozeMutation.mutate(proposal.id)}
+                          disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
+                          className="p-3 text-amber-600 hover:bg-amber-50 active:bg-amber-100 rounded-lg transition-colors disabled:opacity-50 min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Snooze - asks founder to share progress"
+                        >
+                          <Pause className="w-5 h-5" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setProcessingProposalId(proposal.id);
+                            setProcessingProposalName(proposal.startupName);
+                            approveMutation.mutate(proposal.id);
+                          }}
+                          disabled={rejectMutation.isPending || approveMutation.isPending || snoozeMutation.isPending}
+                          className="p-3 text-green-600 hover:bg-green-50 active:bg-green-100 rounded-lg transition-colors disabled:opacity-50 min-h-[44px] min-w-[44px] flex items-center justify-center"
+                          title="Approve - add to evaluation"
+                        >
+                          <Check className="w-5 h-5" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -414,10 +441,10 @@ export default function DashboardPage() {
 
       {/* Recent Startups */}
       <div className="card">
-        <div className="p-5 border-b border-gray-200">
+        <div className="p-4 sm:p-5 border-b border-gray-200">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">Top Scored Startups</h2>
-            <Link to="/startups" className="text-sm text-primary-600 hover:text-primary-700">
+            <h2 className="text-base sm:text-lg font-semibold text-gray-900">Top Scored Startups</h2>
+            <Link to="/startups" className="text-sm text-primary-600 hover:text-primary-700 active:text-primary-800 min-h-[44px] flex items-center">
               View all
             </Link>
           </div>
@@ -440,18 +467,18 @@ export default function DashboardPage() {
               <Link
                 key={startup.id}
                 to={`/startups/${startup.id}`}
-                className="flex items-center justify-between p-5 hover:bg-gray-50 transition-colors"
+                className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3"
               >
-                <div className="flex items-center gap-4">
-                  <div className="flex items-center justify-center w-10 h-10 bg-primary-100 rounded-lg">
+                <div className="flex items-center gap-3 sm:gap-4">
+                  <div className="flex items-center justify-center w-10 h-10 bg-primary-100 rounded-lg flex-shrink-0">
                     <span className="text-lg font-bold text-primary-600">
                       {startup.name.charAt(0)}
                     </span>
                   </div>
-                  <div>
-                    <p className="font-medium text-gray-900">{startup.name}</p>
-                    <div className="flex items-center gap-2">
-                      <span className={clsx('badge', statusConfig[startup.status]?.color || 'bg-gray-100 text-gray-700')}>
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 truncate">{startup.name}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={clsx('badge text-xs', statusConfig[startup.status]?.color || 'bg-gray-100 text-gray-700')}>
                         {statusConfig[startup.status]?.label || startup.status}
                       </span>
                       {startup.stage && (
@@ -463,7 +490,7 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4" onClick={(e) => e.preventDefault()}>
+                <div className="flex items-center gap-3 sm:gap-4 pl-13 sm:pl-0" onClick={(e) => e.preventDefault()}>
                   {/* Score with breakdown modal */}
                   <div className="flex items-center gap-2">
                     <ScoreBadge score={startup.currentScore} startupId={startup.id} size="lg" />
@@ -480,7 +507,7 @@ export default function DashboardPage() {
 
                   {/* Score bar */}
                   {startup.currentScore && (
-                    <div className="w-24">
+                    <div className="w-20 sm:w-24">
                       <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                         <div
                           className={clsx(
@@ -598,6 +625,52 @@ export default function DashboardPage() {
               </p>
               <p className="text-xs text-gray-400 mt-2">
                 Please wait, this usually takes 15-30 seconds
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approval Processing Overlay */}
+      {processingProposalId && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4">
+            <div className="text-center">
+              {/* Animated icon */}
+              <div className="mx-auto w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mb-4">
+                <Brain className="w-8 h-8 text-primary-600 animate-pulse" />
+              </div>
+
+              <h3 className="text-xl font-bold text-gray-900 mb-2">
+                Analyzing {processingProposalName}
+              </h3>
+
+              <p className="text-gray-600 mb-6">
+                AI is evaluating the startup and generating an investment score...
+              </p>
+
+              {/* Progress indicator */}
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center gap-3 p-3 bg-primary-50 rounded-lg">
+                  <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
+                  <span className="text-sm text-primary-700">Extracting startup information</span>
+                </div>
+                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg opacity-60">
+                  <Brain className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-500">Analyzing business model & market</span>
+                </div>
+                <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg opacity-60">
+                  <Target className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-500">Generating investment score</span>
+                </div>
+              </div>
+
+              {/* Loading bar */}
+              <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div className="h-full bg-primary-500 rounded-full animate-progress" style={{ width: '60%' }} />
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                This typically takes 5-10 seconds
               </p>
             </div>
           </div>

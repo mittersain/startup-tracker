@@ -89,6 +89,7 @@ export const authApi = {
 export const startupsApi = {
   list: async (params?: {
     status?: string;
+    excludeStatus?: string;
     stage?: string;
     search?: string;
     sortBy?: string;
@@ -153,6 +154,94 @@ export const startupsApi = {
     const response = await api.patch(`/startups/${id}/draft-reply`, { draftReply });
     return response.data;
   },
+
+  resetDraftReplyStatus: async (id: string) => {
+    const response = await api.patch(`/startups/${id}/draft-reply`, { draftReplyStatus: 'pending' });
+    return response.data;
+  },
+
+  rescanAttachments: async (id: string) => {
+    const response = await api.post(`/startups/${id}/rescan-attachments`);
+    return response.data;
+  },
+
+  generateScoreEvents: async (id: string) => {
+    const response = await api.post(`/startups/${id}/generate-score-events`);
+    return response.data;
+  },
+
+  snooze: async (id: string, reason: string, followUpMonths?: number) => {
+    const response = await api.post(`/startups/${id}/snooze`, { reason, followUpMonths });
+    return response.data;
+  },
+
+  pass: async (id: string, reason: string) => {
+    const response = await api.post(`/startups/${id}/pass`, { reason });
+    return response.data;
+  },
+
+  sendDecisionEmail: async (id: string, emailBody: string, emailSubject?: string) => {
+    const response = await api.post(`/startups/${id}/send-decision-email`, { emailBody, emailSubject });
+    return response.data;
+  },
+
+  recordFounderUpdate: async (id: string, updateContent: string, source?: string) => {
+    const response = await api.post(`/startups/${id}/founder-update`, { updateContent, source });
+    return response.data;
+  },
+
+  // AI Chat
+  getChatHistory: async (id: string) => {
+    const response = await api.get(`/startups/${id}/chat`);
+    return response.data;
+  },
+
+  sendChatMessage: async (id: string, message: string) => {
+    const response = await api.post(`/startups/${id}/chat`, { message });
+    return response.data;
+  },
+
+  clearChatHistory: async (id: string) => {
+    const response = await api.delete(`/startups/${id}/chat`);
+    return response.data;
+  },
+
+  // Enrichment
+  triggerEnrichment: async (id: string) => {
+    const response = await api.post(`/startups/${id}/enrich`);
+    return response.data;
+  },
+
+  getEnrichment: async (id: string) => {
+    const response = await api.get(`/startups/${id}/enrichment`);
+    return response.data;
+  },
+};
+
+// Reminders API
+export const remindersApi = {
+  getPending: async () => {
+    const response = await api.get('/reminders');
+    return response.data;
+  },
+
+  dismiss: async (id: string) => {
+    const response = await api.post(`/reminders/${id}/dismiss`);
+    return response.data;
+  },
+};
+
+// Alerts API
+export const alertsApi = {
+  getUnread: async () => {
+    const response = await api.get('/alerts');
+    return response.data;
+  },
+
+  markAsRead: async (id: string) => {
+    const response = await api.post(`/alerts/${id}/read`);
+    return response.data;
+  },
 };
 
 // Decks API
@@ -184,6 +273,12 @@ export const decksApi = {
     return response.data;
   },
 
+  getDownloadUrl: (id: string) => {
+    // Return the download URL that goes through the backend
+    const baseUrl = import.meta.env.VITE_API_URL || '/api';
+    return `${baseUrl}/decks/${id}/download`;
+  },
+
   delete: async (id: string) => {
     await api.delete(`/decks/${id}`);
   },
@@ -203,6 +298,11 @@ export const emailsApi = {
 
   match: async (emailId: string, startupId: string) => {
     const response = await api.post(`/emails/${emailId}/match`, { startupId });
+    return response.data;
+  },
+
+  compose: async (startupId: string, data: { to?: string; subject: string; body: string; replyToEmailId?: string }) => {
+    const response = await api.post(`/emails/startup/${startupId}/compose`, data);
     return response.data;
   },
 

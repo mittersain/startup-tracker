@@ -99,7 +99,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, UserPermissions> = {
 // Startup & Deal
 // ==========================================
 
-export type DealStatus = 'reviewing' | 'due_diligence' | 'invested' | 'passed' | 'archived';
+export type DealStatus = 'reviewing' | 'due_diligence' | 'invested' | 'snoozed' | 'passed' | 'archived';
 export type FundingStage = 'pre_seed' | 'seed' | 'series_a' | 'series_b' | 'series_c' | 'growth';
 
 export interface Startup {

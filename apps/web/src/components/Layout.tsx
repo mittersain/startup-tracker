@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/auth.store';
 import { authApi } from '@/services/api';
@@ -8,6 +9,8 @@ import {
   LogOut,
   Bell,
   User,
+  Menu,
+  X,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -21,6 +24,7 @@ export default function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, tokens, logout } = useAuthStore();
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const handleLogout = async () => {
     try {
@@ -36,12 +40,32 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Sidebar */}
-      <div className="fixed inset-y-0 left-0 w-64 bg-white border-r border-gray-200">
+      {/* Mobile menu overlay */}
+      {isMobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Sidebar - hidden on mobile, fixed on desktop */}
+      <div className={clsx(
+        'fixed inset-y-0 left-0 w-64 bg-white border-r border-gray-200 z-50 transform transition-transform duration-300 ease-in-out lg:translate-x-0',
+        isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+      )}>
         {/* Logo */}
-        <div className="flex items-center h-16 px-6 border-b border-gray-200">
-          <Briefcase className="w-8 h-8 text-primary-600" />
-          <span className="ml-2 text-xl font-bold text-gray-900">StartupTracker</span>
+        <div className="flex items-center justify-between h-16 px-6 border-b border-gray-200">
+          <div className="flex items-center">
+            <Briefcase className="w-8 h-8 text-primary-600" />
+            <span className="ml-2 text-xl font-bold text-gray-900">StartupTracker</span>
+          </div>
+          {/* Mobile close button */}
+          <button
+            onClick={() => setIsMobileMenuOpen(false)}
+            className="lg:hidden p-2 -mr-2 text-gray-400 hover:text-gray-600"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Navigation */}
@@ -54,8 +78,9 @@ export default function Layout() {
               <Link
                 key={item.name}
                 to={item.href}
+                onClick={() => setIsMobileMenuOpen(false)}
                 className={clsx(
-                  'flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-lg transition-colors',
+                  'flex items-center gap-3 px-3 py-3 text-sm font-medium rounded-lg transition-colors',
                   isActive
                     ? 'bg-primary-50 text-primary-700'
                     : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
@@ -84,32 +109,44 @@ export default function Layout() {
             </div>
             <button
               onClick={handleLogout}
-              className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 min-h-[44px] min-w-[44px] flex items-center justify-center"
               title="Logout"
             >
-              <LogOut className="w-4 h-4" />
+              <LogOut className="w-5 h-5" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Main content */}
-      <div className="pl-64">
+      {/* Main content - responsive padding */}
+      <div className="lg:pl-64">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-gray-200">
-          <div className="flex items-center justify-between h-full px-6">
-            <div />
-            <div className="flex items-center gap-4">
-              <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 relative">
+        <header className="sticky top-0 h-16 bg-white border-b border-gray-200 z-30">
+          <div className="flex items-center justify-between h-full px-4 sm:px-6">
+            {/* Mobile menu button */}
+            <button
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="lg:hidden p-2 -ml-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg min-h-[44px] min-w-[44px] flex items-center justify-center"
+            >
+              <Menu className="w-6 h-6" />
+            </button>
+            {/* Mobile logo */}
+            <div className="lg:hidden flex items-center">
+              <Briefcase className="w-6 h-6 text-primary-600" />
+              <span className="ml-2 text-lg font-bold text-gray-900">StartupTracker</span>
+            </div>
+            <div className="hidden lg:block" />
+            <div className="flex items-center gap-2 sm:gap-4">
+              <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 relative min-h-[44px] min-w-[44px] flex items-center justify-center">
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-danger-500 rounded-full" />
+                <span className="absolute top-2 right-2 w-2 h-2 bg-danger-500 rounded-full" />
               </button>
             </div>
           </div>
         </header>
 
-        {/* Page content */}
-        <main className="p-6">
+        {/* Page content - responsive padding */}
+        <main className="p-4 sm:p-6">
           <Outlet />
         </main>
       </div>
