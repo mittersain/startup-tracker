@@ -10,6 +10,7 @@ import { aiService } from './ai.service.js';
 import { scoringService } from './scoring.service.js';
 import { emailService } from './email.service.js';
 import prisma from '../utils/prisma.js';
+import { decrypt, isEncrypted } from '../utils/encryption.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ScoreCategory } from '@startup-tracker/shared';
 
@@ -80,17 +81,21 @@ export class EmailInboxService {
    * Create an ImapFlow client
    */
   private createClient(config: InboxConfig): ImapFlow {
+    // SECURITY: Decrypt password if it's encrypted
+    const password = isEncrypted(config.password) ? decrypt(config.password) : config.password;
+
     return new ImapFlow({
       host: config.host,
       port: config.port,
       secure: config.tls,
       auth: {
         user: config.user,
-        pass: config.password,
+        pass: password,  // Use decrypted password
       },
       logger: false,
       tls: {
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,  // SECURITY: Always verify TLS certificates to prevent MITM attacks
+        minVersion: 'TLSv1.2',     // Enforce modern TLS version
       },
     });
   }

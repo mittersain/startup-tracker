@@ -4,6 +4,7 @@ import { authenticate, requirePermission } from '../middleware/auth.js';
 import { AppError } from '../middleware/error-handler.js';
 import { emailInboxService, type InboxConfig, type SyncResult } from '../services/email-inbox.service.js';
 import prisma from '../utils/prisma.js';
+import { encrypt } from '../utils/encryption.js';
 import type { Request, Response, NextFunction } from 'express';
 
 export const inboxRouter = Router();
@@ -105,6 +106,9 @@ inboxRouter.post(
 
       const currentSettings = (org?.settings as Record<string, unknown>) || {};
 
+      // SECURITY: Encrypt password before storing
+      const encryptedPassword = encrypt(password);
+
       // Update settings with inbox config
       await prisma.organization.update({
         where: { id: req.user.organizationId },
@@ -115,7 +119,7 @@ inboxRouter.post(
               host,
               port,
               user,
-              password,
+              password: encryptedPassword,  // Store encrypted password
               tls,
               folder,
               pollingEnabled,

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import { z } from 'zod';
 
 import { errorHandler } from './middleware/error-handler.js';
 import { authRouter } from './routes/auth.routes.js';
@@ -15,6 +16,34 @@ import { evaluationRouter } from './routes/evaluation.routes.js';
 import { backupService } from './services/backup.service.js';
 
 dotenv.config();
+
+// SECURITY: Validate critical environment variables on startup
+const envSchema = z.object({
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
+  ENCRYPTION_KEY: z.string().min(32, 'ENCRYPTION_KEY must be at least 32 characters'),
+  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
+  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN is required'),
+  PORT: z.string().regex(/^\d+$/, 'PORT must be a number').optional(),
+  NODE_ENV: z.enum(['development', 'production', 'test']).optional(),
+  JWT_EXPIRES_IN: z.string().optional(),
+  JWT_REFRESH_EXPIRES_IN: z.string().optional(),
+});
+
+try {
+  envSchema.parse(process.env);
+  console.log('✅ Environment variables validated successfully');
+} catch (error) {
+  console.error('❌ CRITICAL: Environment validation failed:');
+  if (error instanceof z.ZodError) {
+    error.errors.forEach((err) => {
+      console.error(`   - ${err.path.join('.')}: ${err.message}`);
+    });
+  }
+  console.error('\n💡 Please check your .env file and ensure all required variables are set.');
+  console.error('   See .env.example for reference.\n');
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env['PORT'] ?? 3001;
