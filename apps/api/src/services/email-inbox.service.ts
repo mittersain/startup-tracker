@@ -366,18 +366,62 @@ export class EmailInboxService {
       },
     });
 
-    // Create initial score event
-    await prisma.scoreEvent.create({
-      data: {
-        startupId: startup.id,
-        category: 'initial',
-        signal: 'Email proposal received',
-        impact: 0,
-        source: `email_intake_${proposal.rawSource}`,
-        evidence: `Extracted from ${proposal.rawSource} with ${proposal.confidence}% confidence`,
-        analyzedBy: 'ai',
-      },
-    });
+    // Initialize evaluation and scoring for the new startup
+    // This ensures the startup has proper scores and can be evaluated
+    try {
+      // Create evaluation record
+      await prisma.startupEvaluation.create({
+        data: {
+          startupId: startup.id,
+          organizationId,
+          stage: 'presentation_review',
+          isPostRevenue: false, // Default to pre-revenue, can be updated later
+        },
+      });
+
+      // Set initial base score from AI confidence
+      const confidenceScore = Math.round(proposal.confidence || 50);
+      const breakdown = {
+        team: { base: Math.round(confidenceScore * 0.25), adjusted: 0, subcriteria: {} },
+        market: { base: Math.round(confidenceScore * 0.25), adjusted: 0, subcriteria: {} },
+        product: { base: Math.round(confidenceScore * 0.20), adjusted: 0, subcriteria: {} },
+        traction: { base: Math.round(confidenceScore * 0.20), adjusted: 0, subcriteria: {} },
+        deal: { base: Math.round(confidenceScore * 0.10), adjusted: 0, subcriteria: {} },
+        communication: 0,
+        momentum: 0,
+        redFlags: 0,
+      };
+
+      // Update startup with proper scoring structure
+      await prisma.startup.update({
+        where: { id: startup.id },
+        data: {
+          baseScore: confidenceScore,
+          currentScore: confidenceScore,
+          scoreBreakdown: breakdown as unknown as object,
+          scoreUpdatedAt: new Date(),
+        },
+      });
+
+      // Create initial score event with positive impact
+      await prisma.scoreEvent.create({
+        data: {
+          startupId: startup.id,
+          category: 'communication',
+          signal: 'Email proposal received - initial evaluation',
+          impact: 0, // Neutral impact, baseScore is already set
+          confidence: proposal.confidence / 100,
+          source: `email_intake_${proposal.rawSource}`,
+          evidence: `Extracted from ${proposal.rawSource} with ${proposal.confidence}% confidence`,
+          analyzedBy: 'ai',
+        },
+      });
+
+      console.log(`[StartupCreation] Initialized evaluation and scoring for ${proposal.startupName} (score: ${confidenceScore})`);
+    } catch (error) {
+      console.error('[StartupCreation] Failed to initialize evaluation, continuing...', error);
+      // Don't fail the entire startup creation if evaluation initialization fails
+    }
 
     // Add founder as contact if email provided
     if (proposal.founderEmail || proposal.contactInfo?.email) {
