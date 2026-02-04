@@ -37,6 +37,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.api = void 0;
+const dotenv = __importStar(require("dotenv"));
+dotenv.config();
 const functionsV1 = __importStar(require("firebase-functions/v1"));
 const admin = __importStar(require("firebase-admin"));
 const express_1 = __importDefault(require("express"));
@@ -56,7 +58,7 @@ const genAI = new generative_ai_1.GoogleGenerativeAI(GEMINI_API_KEY);
 // AI Helper function to extract startup proposal from email
 async function extractStartupFromEmail(subject, body, from) {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Analyze this email and determine if it's a startup investment proposal or pitch.
 
 Email Subject: ${subject}
@@ -95,7 +97,7 @@ Important: Return false for newsletters, marketing emails, automated notificatio
 // AI Helper function to analyze a startup and generate scores + business model
 async function analyzeStartupWithAI(startup) {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Analyze this startup pitch and provide a comprehensive evaluation.
 
 Startup Name: ${startup.name}
@@ -178,7 +180,7 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
 // AI Helper function to analyze an attachment (pitch deck, document)
 async function analyzeAttachmentWithAI(fileName, mimeType, startupName) {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const fileType = mimeType.includes('pdf') ? 'PDF' :
             mimeType.includes('presentation') || mimeType.includes('powerpoint') ? 'Pitch Deck' :
                 mimeType.includes('word') || mimeType.includes('document') ? 'Document' : 'File';
@@ -623,7 +625,7 @@ app.post('/startups/:id/snooze', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Startup not found' });
         }
         // Generate AI draft email for snooze
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
         const prompt = `You are a professional venture capital investor. Write a polite email to the founder explaining that you're putting their startup on hold for now but would like to follow up in ${followUpMonths} months.
 
@@ -693,7 +695,7 @@ app.post('/startups/:id/pass', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Startup not found' });
         }
         // Generate AI draft email for pass
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
         const prompt = `You are a professional venture capital investor. Write a polite rejection email to the founder explaining that you've decided to pass on their startup.
 
@@ -920,7 +922,7 @@ ${startupData.snoozeReason ? `Snooze Reason: ${startupData.snoozeReason}` : ''}
 ${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
 `;
         // Generate AI response
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const systemPrompt = `You are an AI assistant helping a venture capital investor analyze and discuss startup investment opportunities. You have access to detailed information about the startup being discussed.
 
 ${startupContext}
@@ -1019,7 +1021,7 @@ async function scrapeWebsite(url) {
         }
         const html = await response.text();
         // Use AI to extract structured data from HTML
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Extract company information from this website HTML. Return ONLY a JSON object:
 
 HTML (first 15000 chars):
@@ -1129,7 +1131,7 @@ async function fetchCrunchbaseData(companyName, website) {
 async function simulateCrunchbaseWithAI(companyName, website) {
     try {
         console.log(`[Enrichment] Using AI to research: ${companyName}`);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Research the startup "${companyName}"${website ? ` (website: ${website})` : ''} and provide available information.
 
 Return ONLY a JSON object with what you know (use null for unknown fields):
@@ -1190,7 +1192,7 @@ async function fetchGoogleNews(companyName) {
             }
         }
         // Fallback: Use AI to provide known news/context
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `What recent news or notable events do you know about the startup "${companyName}"?
 
 Return ONLY a JSON array of news items you're aware of (max 3):
@@ -1226,7 +1228,7 @@ async function fetchLinkedInCompanyData(companyName, website, linkedInUrl) {
     try {
         console.log(`[Enrichment] Fetching LinkedIn data for: ${companyName}`);
         // Use AI to research LinkedIn company information
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Research the LinkedIn company profile for "${companyName}"${website ? ` (website: ${website})` : ''}${linkedInUrl ? ` (LinkedIn: ${linkedInUrl})` : ''}.
 
 Based on publicly available information about this company's LinkedIn presence, provide:
@@ -1269,7 +1271,7 @@ Use your knowledge to provide accurate information. If you're uncertain about sp
 async function fetchLinkedInFounderData(companyName, founderNames, founderLinkedIns) {
     try {
         console.log(`[Enrichment] Fetching LinkedIn founder data for: ${companyName}`);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const founderContext = founderNames && founderNames.length > 0
             ? `Known founders: ${founderNames.join(', ')}`
             : '';
@@ -1328,7 +1330,7 @@ Focus on founders, CEOs, CTOs, and other C-level executives.`;
 // Helper: Generate AI summary from all enrichment data
 async function generateEnrichmentSummary(startupData, enrichmentData) {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Analyze this startup enrichment data and provide an investment-focused summary.
 
 Startup: ${startupData.name}
@@ -3428,7 +3430,7 @@ app.post('/decks/startup/:startupId', authenticate, async (req, res) => {
 // AI analysis helper for decks
 async function analyzeDeckWithAI(deckId, fileBuffer, fileName, startupId) {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const prompt = `Analyze this startup pitch deck and provide a detailed analysis in this JSON format:
 {
   "score": number (0-100, quality/investment potential score),

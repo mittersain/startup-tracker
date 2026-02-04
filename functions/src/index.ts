@@ -1,3 +1,6 @@
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import * as functionsV1 from 'firebase-functions/v1';
 import * as admin from 'firebase-admin';
 import express from 'express';
@@ -28,7 +31,7 @@ async function extractStartupFromEmail(subject: string, body: string, from: stri
   reason: string;
 } | null> {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Analyze this email and determine if it's a startup investment proposal or pitch.
 
@@ -111,7 +114,7 @@ async function analyzeStartupWithAI(startup: {
   draftReply: string;
 } | null> {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Analyze this startup pitch and provide a comprehensive evaluation.
 
@@ -204,7 +207,7 @@ async function analyzeAttachmentWithAI(fileName: string, mimeType: string, start
   keyMetrics: Record<string, string | null>;
 } | null> {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const fileType = mimeType.includes('pdf') ? 'PDF' :
                      mimeType.includes('presentation') || mimeType.includes('powerpoint') ? 'Pitch Deck' :
@@ -747,7 +750,7 @@ app.post('/startups/:id/snooze', authenticate, async (req: AuthRequest, res) => 
     }
 
     // Generate AI draft email for snooze
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
 
     const prompt = `You are a professional venture capital investor. Write a polite email to the founder explaining that you're putting their startup on hold for now but would like to follow up in ${followUpMonths} months.
@@ -826,7 +829,7 @@ app.post('/startups/:id/pass', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Generate AI draft email for pass
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
 
     const prompt = `You are a professional venture capital investor. Write a polite rejection email to the founder explaining that you've decided to pass on their startup.
@@ -1084,7 +1087,7 @@ ${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
 `;
 
     // Generate AI response
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const systemPrompt = `You are an AI assistant helping a venture capital investor analyze and discuss startup investment opportunities. You have access to detailed information about the startup being discussed.
 
@@ -1295,7 +1298,7 @@ async function scrapeWebsite(url: string): Promise<EnrichmentData['website'] | n
     const html = await response.text();
 
     // Use AI to extract structured data from HTML
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const prompt = `Extract company information from this website HTML. Return ONLY a JSON object:
 
 HTML (first 15000 chars):
@@ -1418,7 +1421,7 @@ async function fetchCrunchbaseData(companyName: string, website?: string): Promi
 async function simulateCrunchbaseWithAI(companyName: string, website?: string): Promise<EnrichmentData['crunchbase'] | null> {
   try {
     console.log(`[Enrichment] Using AI to research: ${companyName}`);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Research the startup "${companyName}"${website ? ` (website: ${website})` : ''} and provide available information.
 
@@ -1488,7 +1491,7 @@ async function fetchGoogleNews(companyName: string): Promise<EnrichmentData['new
     }
 
     // Fallback: Use AI to provide known news/context
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const prompt = `What recent news or notable events do you know about the startup "${companyName}"?
 
 Return ONLY a JSON array of news items you're aware of (max 3):
@@ -1532,7 +1535,7 @@ async function fetchLinkedInCompanyData(
     console.log(`[Enrichment] Fetching LinkedIn data for: ${companyName}`);
 
     // Use AI to research LinkedIn company information
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Research the LinkedIn company profile for "${companyName}"${website ? ` (website: ${website})` : ''}${linkedInUrl ? ` (LinkedIn: ${linkedInUrl})` : ''}.
 
@@ -1584,7 +1587,7 @@ async function fetchLinkedInFounderData(
   try {
     console.log(`[Enrichment] Fetching LinkedIn founder data for: ${companyName}`);
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const founderContext = founderNames && founderNames.length > 0
       ? `Known founders: ${founderNames.join(', ')}`
@@ -1654,7 +1657,7 @@ async function generateEnrichmentSummary(
   enrichmentData: EnrichmentData
 ): Promise<EnrichmentData['aiSummary'] | null> {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Analyze this startup enrichment data and provide an investment-focused summary.
 
@@ -4013,7 +4016,7 @@ app.post('/decks/startup/:startupId', authenticate, async (req: AuthRequest, res
 // AI analysis helper for decks
 async function analyzeDeckWithAI(deckId: string, fileBuffer: Buffer, fileName: string, startupId: string) {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     const prompt = `Analyze this startup pitch deck and provide a detailed analysis in this JSON format:
 {
