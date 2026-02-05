@@ -334,6 +334,25 @@ export const emailsApi = {
     const response = await api.post(`/emails/${emailId}/analyze`);
     return response.data;
   },
+
+  generateReply: async (emailId: string): Promise<{
+    success: boolean;
+    recommendation: 'continue' | 'pass' | 'schedule_call';
+    recommendationReason: string;
+    draftReply: string;
+    suggestedQuestions: string[];
+    responseQuality: {
+      score: number;
+      clarity: number;
+      responsiveness: number;
+      substance: number;
+      concerns: string[];
+      positives: string[];
+    };
+  }> => {
+    const response = await api.post(`/emails/${emailId}/generate-reply`);
+    return response.data;
+  },
 };
 
 // Inbox API

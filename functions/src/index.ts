@@ -161,22 +161,27 @@ Provide your analysis as a JSON object with this exact structure:
     "concerns": string[] (3-5 key concerns or risks),
     "keyQuestions": string[] (5-8 specific, insightful questions to ask the founders covering: traction metrics, unit economics, competitive differentiation, go-to-market strategy, team background, funding history, and growth plans)
   },
-  "draftReply": string (a professional, warm email reply to the founder that:
-    1. Opens with a personalized acknowledgment of their pitch and what caught your attention
-    2. Includes ALL the keyQuestions formatted as a numbered list for clarity
-    3. Expresses genuine interest in learning more
-    4. Signs off as "Nitish"
+  "draftReply": string (a direct, natural email reply from an individual angel investor.
 
-    The email should be comprehensive and include questions about:
-    - Current traction and key metrics (users, revenue, growth rate)
-    - Unit economics and path to profitability
-    - Competitive landscape and differentiation
-    - Team background and relevant experience
-    - Funding history and current runway
-    - Go-to-market strategy and customer acquisition
-    - Near-term and long-term vision
+    TONE - be direct and to the point:
+    - NO pleasantries like "hope this finds you well", "thanks so much for reaching out"
+    - Write like texting a smart friend, not a formal business letter
+    - Use "I" not "we" - personal investor
+    - Skip the flattery - get to the questions
 
-    Format the questions as a clear numbered list within the email body.)
+    STRUCTURE:
+    1. One short line acknowledging what they're building (optional)
+    2. Your questions - work them naturally into the email, can be numbered or inline
+    3. Sign off simply as "Nitish"
+
+    QUESTIONS to include (pick 4-5 most relevant):
+    - Current traction (users, revenue, growth)
+    - Unit economics / how money is made
+    - What's different from competitors
+    - Team background
+    - How much raising and use of funds
+
+    Keep it SHORT - 3-5 sentences total. Founders are busy, you're busy.)
 }
 
 Be realistic in your scoring. Early-stage startups with limited info should score 40-60. Only exceptional startups with strong traction score above 70.
@@ -198,6 +203,128 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     return parsed;
   } catch (error) {
     console.error('[AI Analyze] Error analyzing startup:', error);
+    return null;
+  }
+}
+
+// AI Helper function to analyze founder response and generate follow-up
+async function analyzeFounderResponse(
+  startupData: {
+    name: string;
+    description?: string;
+    founderName?: string;
+    stage?: string;
+    currentScore?: number;
+    scoreBreakdown?: Record<string, unknown>;
+    businessModelAnalysis?: Record<string, unknown>;
+  },
+  responseEmail: {
+    subject: string;
+    body: string;
+    from: string;
+  },
+  previousEmails: Array<{ subject: string; body: string; direction: string; date: Date }>
+): Promise<{
+  responseQuality: {
+    score: number; // 1-10
+    clarity: number;
+    responsiveness: number;
+    substance: number;
+    concerns: string[];
+    positives: string[];
+  };
+  scoreAdjustment: {
+    communication: number; // -5 to +5
+    team: number;
+    product: number;
+    traction: number;
+    momentum: number;
+    reasoning: string;
+  };
+  recommendation: 'continue' | 'pass' | 'schedule_call';
+  recommendationReason: string;
+  draftReply: string;
+  suggestedQuestions: string[];
+} | null> {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const conversationHistory = previousEmails
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .map(e => `[${e.direction === 'inbound' ? 'Founder' : 'You'}]: ${e.subject}\n${e.body.substring(0, 500)}`)
+      .join('\n\n---\n\n');
+
+    const prompt = `You are helping an individual angel investor evaluate a founder's email response. Be practical and direct.
+
+STARTUP CONTEXT:
+- Name: ${startupData.name}
+- Stage: ${startupData.stage || 'Unknown'}
+- Description: ${startupData.description || 'Not provided'}
+- Current Score: ${startupData.currentScore || 'Not scored yet'}/100
+- Founder: ${startupData.founderName || 'Unknown'}
+
+PREVIOUS CONVERSATION:
+${conversationHistory || 'No previous emails'}
+
+NEW FOUNDER RESPONSE:
+Subject: ${responseEmail.subject}
+From: ${responseEmail.from}
+Body: ${responseEmail.body}
+
+Analyze the founder's response and provide your assessment. Return ONLY a JSON object:
+
+{
+  "responseQuality": {
+    "score": <1-10 overall quality>,
+    "clarity": <1-10 how clear and well-structured>,
+    "responsiveness": <1-10 how well they addressed questions>,
+    "substance": <1-10 depth of information provided>,
+    "concerns": ["<any red flags or concerns from this response>"],
+    "positives": ["<positive signals from this response>"]
+  },
+  "scoreAdjustment": {
+    "communication": <-5 to +5 adjustment>,
+    "team": <-3 to +3 based on founder quality signals>,
+    "product": <-3 to +3 if product details revealed>,
+    "traction": <-3 to +3 if traction data shared>,
+    "momentum": <-3 to +3 based on energy/progress>,
+    "reasoning": "<brief explanation of adjustments>"
+  },
+  "recommendation": "<continue|pass|schedule_call>",
+  "recommendationReason": "<why you recommend this action>",
+  "draftReply": "<your reply to the founder - include any follow-up questions directly in the message>",
+  "suggestedQuestions": ["<2-3 additional questions if needed>"]
+}
+
+RECOMMENDATION RULES (IMPORTANT):
+- Default to "continue" - keep the conversation going via email
+- Only recommend "schedule_call" if: founder has answered most questions well AND you're genuinely excited AND ready to discuss terms or serious next steps. The investor has LIMITED bandwidth for calls.
+- Recommend "pass" only for clear red flags, fundamental misfit, or if the founder is unresponsive/evasive
+
+TONE GUIDELINES for draftReply (CRITICAL):
+- Be direct and to the point - no unnecessary pleasantries
+- Write like you're texting a smart friend, not writing a business letter
+- NO corporate speak: avoid "hope this finds you well", "thanks so much", "I really appreciate", "looking forward to"
+- If you have follow-up questions, work them naturally INTO the reply itself
+- Keep it brief - 2-4 sentences is usually enough
+- Don't over-explain or apologize
+- Sound like a busy person who's interested but values their time
+- Use "I" not "we" - this is a personal investor
+- Sign off simply: "- Nitish" or just "Nitish"`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.log('[AI Response Analysis] No JSON found in response');
+      return null;
+    }
+
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    console.error('[AI Response Analysis] Error:', error);
     return null;
   }
 }
@@ -757,23 +884,29 @@ app.post('/startups/:id/snooze', authenticate, async (req: AuthRequest, res) => 
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
     const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
 
-    const prompt = `You are a professional venture capital investor. Write a polite email to the founder explaining that you're putting their startup on hold for now but would like to follow up in ${followUpMonths} months.
+    const prompt = `You are an individual angel investor (NOT a fund) writing to a founder. Write a friendly but honest email explaining that you're putting their startup on hold for now but would like to follow up in ${followUpMonths} months.
 
 Startup: ${data.name}
 Founder: ${data.founderName || 'Founder'}
 Business Context: ${businessContext}
-Investor's Reason for Snoozing: ${reason}
+Your Reason for Putting on Hold: ${reason}
+
+TONE GUIDELINES:
+- Write as "I" not "we" - you're a personal investor
+- Keep it conversational and natural, not corporate
+- Be warm and genuine, not formal VC-speak
+- Avoid jargon like "circle back", "touch base", "synergies"
+- Sound like a real person having a real conversation
 
 The email should:
-1. Be professional and encouraging
-2. Acknowledge the potential of the business
-3. Explain that the timing isn't right now based on the investor's reason
-4. Request the founder to keep you updated on their progress (monthly updates preferred)
-5. Mention that you'll proactively follow up in ${followUpMonths} months
-6. Keep the door open for future investment
-7. Be concise (under 200 words)
+1. Be friendly and encouraging
+2. Briefly acknowledge what you like about their business
+3. Be honest about why now isn't the right time (based on your reason)
+4. Ask them to keep you in the loop with updates
+5. Mention you'll reach out again in ${followUpMonths} months
+6. Keep it short - 3-5 sentences max
 
-Write ONLY the email body, no subject line. Sign off as "Best regards" without a name.`;
+Write ONLY the email body, no subject line. Sign off casually like "Cheers" or "Best" without a name.`;
 
     const aiResult = await model.generateContent(prompt);
     const draftEmail = aiResult.response.text().trim();
@@ -836,22 +969,28 @@ app.post('/startups/:id/pass', authenticate, async (req: AuthRequest, res) => {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
     const businessContext = data.businessModelAnalysis ? JSON.stringify(data.businessModelAnalysis) : data.description || '';
 
-    const prompt = `You are a professional venture capital investor. Write a polite rejection email to the founder explaining that you've decided to pass on their startup.
+    const prompt = `You are an individual angel investor (NOT a fund) writing to decline an investment opportunity. Write a kind but clear rejection email.
 
 Startup: ${data.name}
 Founder: ${data.founderName || 'Founder'}
 Business Context: ${businessContext}
-Investor's Reason for Passing: ${reason}
+Your Reason for Passing: ${reason}
+
+TONE GUIDELINES:
+- Write as "I" not "we" - you're a personal investor
+- Be genuine and human, not corporate
+- Be kind but don't over-explain or apologize excessively
+- Avoid VC jargon and buzzwords
+- Sound like a real person, not a rejection template
 
 The email should:
-1. Be respectful and professional
-2. Thank them for considering you
-3. Provide constructive feedback based on the investor's reason without being harsh
-4. Wish them success in their journey
-5. Keep it brief and kind (under 150 words)
-6. NOT leave the door open for future investment (this is a definitive pass)
+1. Thank them briefly for sharing their startup
+2. Be honest but kind about why it's not a fit for you personally
+3. Wish them well genuinely
+4. Keep it SHORT - 2-3 sentences max. Less is more with rejections.
+5. Don't leave the door open or give false hope
 
-Write ONLY the email body, no subject line. Sign off as "Best regards" without a name.`;
+Write ONLY the email body, no subject line. Sign off simply like "Best" or "Wishing you well" without a name.`;
 
     const aiResult = await model.generateContent(prompt);
     const draftEmail = aiResult.response.text().trim();
@@ -1093,17 +1232,22 @@ ${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
     // Generate AI response
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const systemPrompt = `You are an AI assistant helping a venture capital investor analyze and discuss startup investment opportunities. You have access to detailed information about the startup being discussed.
+    const systemPrompt = `You are an AI assistant helping an individual angel investor (NOT a VC fund) analyze startup investment opportunities. The investor makes personal investments, not through a fund.
 
 ${startupContext}
 
+IMPORTANT CONTEXT:
+- The investor invests their own money personally, not through a fund
+- Use "you" and speak to them as an individual, not "your fund" or "your firm"
+- Keep advice practical for a personal investor's perspective
+
 You should:
-1. Provide thoughtful analysis based on the startup's information
-2. Help identify potential risks and opportunities
-3. Suggest relevant due diligence questions
-4. Compare to industry standards when relevant
-5. Be direct and concise in your responses
-6. If you don't have enough information to answer, say so clearly
+1. Provide thoughtful, practical analysis
+2. Help identify risks and opportunities relevant to an individual investor
+3. Suggest due diligence questions that a personal investor would ask
+4. Be direct and conversational - avoid corporate/VC jargon
+5. Keep responses concise and actionable
+6. If you don't have enough information, say so clearly
 
 Previous conversation context is provided to maintain continuity.`;
 
@@ -2704,10 +2848,48 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
               // This is a reply from a founder we're already tracking!
               const startupDoc = startupByFounderEmail.docs[0];
               const startupData = startupDoc.data();
+              const emailBody = parsed.text || parsed.html || '';
 
               console.log(`[EmailSync] Found reply from founder: ${fromEmail} for startup: ${startupData.name}`);
 
-              // Store the email linked to this startup
+              // Fetch previous emails for context (without orderBy to avoid index requirement)
+              const previousEmailsSnapshot = await db.collection('emails')
+                .where('startupId', '==', startupDoc.id)
+                .get();
+
+              const previousEmails = previousEmailsSnapshot.docs.map(doc => {
+                const data = doc.data();
+                return {
+                  subject: data.subject || '',
+                  body: data.body || '',
+                  direction: data.direction || 'inbound',
+                  date: data.date?.toDate?.() || new Date(data.date),
+                };
+              })
+                .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Sort in memory
+                .slice(0, 10); // Limit to 10
+
+              // AI Analysis of founder response
+              console.log(`[EmailSync] Analyzing founder response with AI for: ${startupData.name}`);
+              const responseAnalysis = await analyzeFounderResponse(
+                {
+                  name: startupData.name,
+                  description: startupData.description,
+                  founderName: startupData.founderName,
+                  stage: startupData.stage,
+                  currentScore: startupData.currentScore,
+                  scoreBreakdown: startupData.scoreBreakdown,
+                  businessModelAnalysis: startupData.businessModelAnalysis,
+                },
+                {
+                  subject,
+                  body: emailBody,
+                  from: `${fromName} <${fromEmail}>`,
+                },
+                previousEmails
+              );
+
+              // Store the email linked to this startup with AI analysis
               const emailRef = db.collection('emails').doc();
               await emailRef.set({
                 startupId: startupDoc.id,
@@ -2716,7 +2898,7 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 from: fromEmail,
                 fromName: fromName || startupData.founderName,
                 to: config.user,
-                body: parsed.text || parsed.html || '',
+                body: emailBody,
                 date: parsed.date || new Date(),
                 direction: 'inbound',
                 isRead: false,
@@ -2724,16 +2906,102 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 messageId,
                 hasAttachments: (parsed.attachments?.length || 0) > 0,
                 attachmentCount: parsed.attachments?.length || 0,
+                // AI Analysis results
+                aiAnalysis: responseAnalysis ? {
+                  responseQuality: responseAnalysis.responseQuality,
+                  recommendation: responseAnalysis.recommendation,
+                  recommendationReason: responseAnalysis.recommendationReason,
+                  suggestedQuestions: responseAnalysis.suggestedQuestions,
+                  analyzedAt: new Date(),
+                } : null,
+                draftReply: responseAnalysis?.draftReply || null,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
               });
 
-              // Update startup's last contact date
-              await startupDoc.ref.update({
-                lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-              });
+              // Update startup score based on AI analysis
+              if (responseAnalysis && responseAnalysis.scoreAdjustment) {
+                const adj = responseAnalysis.scoreAdjustment;
+                const currentBreakdown = startupData.scoreBreakdown || {};
 
-              console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}`);
+                // Calculate score adjustments
+                const communicationAdj = adj.communication || 0;
+                const teamAdj = adj.team || 0;
+                const productAdj = adj.product || 0;
+                const tractionAdj = adj.traction || 0;
+                const momentumAdj = adj.momentum || 0;
+
+                // Update score breakdown
+                const newBreakdown = {
+                  ...currentBreakdown,
+                  communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
+                  momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
+                  team: currentBreakdown.team ? {
+                    ...currentBreakdown.team,
+                    adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
+                  } : currentBreakdown.team,
+                  product: currentBreakdown.product ? {
+                    ...currentBreakdown.product,
+                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
+                  } : currentBreakdown.product,
+                  traction: currentBreakdown.traction ? {
+                    ...currentBreakdown.traction,
+                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
+                  } : currentBreakdown.traction,
+                };
+
+                // Recalculate total score
+                const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
+                const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
+                const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
+                const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
+                const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
+                const commScore = newBreakdown.communication || 5;
+                const momScore = newBreakdown.momentum || 5;
+                const redFlags = newBreakdown.redFlags || 0;
+
+                const newTotalScore = Math.round(
+                  teamScore + marketScore + productScore + tractionScore + dealScore +
+                  commScore + momScore - redFlags
+                );
+
+                // Record score event
+                await db.collection('startups').doc(startupDoc.id).collection('scoreEvents').add({
+                  previousScore: startupData.currentScore || 0,
+                  newScore: newTotalScore,
+                  change: newTotalScore - (startupData.currentScore || 0),
+                  reason: `Founder response analyzed: ${adj.reasoning}`,
+                  source: 'founder_response',
+                  aiAnalysis: responseAnalysis.responseQuality,
+                  recommendation: responseAnalysis.recommendation,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+
+                // Update startup with new score and draft reply
+                await startupDoc.ref.update({
+                  currentScore: newTotalScore,
+                  scoreBreakdown: newBreakdown,
+                  lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  lastResponseAnalysis: {
+                    quality: responseAnalysis.responseQuality,
+                    recommendation: responseAnalysis.recommendation,
+                    recommendationReason: responseAnalysis.recommendationReason,
+                    suggestedQuestions: responseAnalysis.suggestedQuestions,
+                    draftReply: responseAnalysis.draftReply,
+                    analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  },
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+
+                console.log(`[EmailSync] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore} (${adj.reasoning})`);
+              } else {
+                // Just update last contact date if no AI analysis
+                await startupDoc.ref.update({
+                  lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+              }
+
+              console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}${responseAnalysis ? ` - AI recommends: ${responseAnalysis.recommendation}` : ''}`);
               processed++;
               results.push({
                 messageId,
@@ -3875,8 +4143,282 @@ app.get('/emails/metrics/:startupId', authenticate, async (req: AuthRequest, res
   }
 });
 
-app.post('/emails/:emailId/analyze', authenticate, async (_req, res) => {
-  return res.json({ success: true, analysis: null });
+app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const emailId = req.params.emailId as string;
+
+    // Get the email
+    const emailDoc = await db.collection('emails').doc(emailId).get();
+    if (!emailDoc.exists) {
+      return res.status(404).json({ error: 'Email not found' });
+    }
+
+    const emailData = emailDoc.data()!;
+
+    // Only analyze inbound emails
+    if (emailData.direction !== 'inbound') {
+      return res.status(400).json({ error: 'Can only analyze inbound emails' });
+    }
+
+    // Get the associated startup
+    const startupId = emailData.startupId;
+    if (!startupId) {
+      return res.status(400).json({ error: 'Email is not linked to a startup' });
+    }
+
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    if (startupData.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Fetch previous emails for context (without orderBy to avoid index requirement)
+    const previousEmailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const previousEmails = previousEmailsSnapshot.docs
+      .filter(doc => doc.id !== emailId) // Exclude current email
+      .map(doc => {
+        const data = doc.data();
+        return {
+          subject: data.subject || '',
+          body: data.body || '',
+          direction: data.direction || 'inbound',
+          date: data.date?.toDate?.() || new Date(data.date),
+        };
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Sort in memory
+      .slice(0, 10); // Limit to 10
+
+    // Analyze the founder response
+    console.log(`[Re-analyze] Analyzing email ${emailId} for startup: ${startupData.name}`);
+    const responseAnalysis = await analyzeFounderResponse(
+      {
+        name: startupData.name,
+        description: startupData.description,
+        founderName: startupData.founderName,
+        stage: startupData.stage,
+        currentScore: startupData.currentScore,
+        scoreBreakdown: startupData.scoreBreakdown,
+        businessModelAnalysis: startupData.businessModelAnalysis,
+      },
+      {
+        subject: emailData.subject || '',
+        body: emailData.body || '',
+        from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
+      },
+      previousEmails
+    );
+
+    if (!responseAnalysis) {
+      return res.status(500).json({ error: 'Failed to analyze email' });
+    }
+
+    // Update the email with AI analysis
+    await emailDoc.ref.update({
+      aiAnalysis: {
+        responseQuality: responseAnalysis.responseQuality,
+        recommendation: responseAnalysis.recommendation,
+        recommendationReason: responseAnalysis.recommendationReason,
+        suggestedQuestions: responseAnalysis.suggestedQuestions,
+        analyzedAt: new Date(),
+      },
+      draftReply: responseAnalysis.draftReply,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Update startup score based on AI analysis
+    if (responseAnalysis.scoreAdjustment) {
+      const adj = responseAnalysis.scoreAdjustment;
+      const currentBreakdown = startupData.scoreBreakdown || {};
+
+      // Calculate score adjustments
+      const communicationAdj = adj.communication || 0;
+      const teamAdj = adj.team || 0;
+      const productAdj = adj.product || 0;
+      const tractionAdj = adj.traction || 0;
+      const momentumAdj = adj.momentum || 0;
+
+      // Update score breakdown
+      const newBreakdown = {
+        ...currentBreakdown,
+        communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
+        momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
+        team: currentBreakdown.team ? {
+          ...currentBreakdown.team,
+          adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
+        } : currentBreakdown.team,
+        product: currentBreakdown.product ? {
+          ...currentBreakdown.product,
+          adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
+        } : currentBreakdown.product,
+        traction: currentBreakdown.traction ? {
+          ...currentBreakdown.traction,
+          adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
+        } : currentBreakdown.traction,
+      };
+
+      // Recalculate total score
+      const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
+      const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
+      const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
+      const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
+      const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
+      const commScore = newBreakdown.communication || 5;
+      const momScore = newBreakdown.momentum || 5;
+      const redFlags = newBreakdown.redFlags || 0;
+
+      const newTotalScore = Math.round(
+        teamScore + marketScore + productScore + tractionScore + dealScore +
+        commScore + momScore - redFlags
+      );
+
+      // Record score event
+      await db.collection('startups').doc(startupId).collection('scoreEvents').add({
+        previousScore: startupData.currentScore || 0,
+        newScore: newTotalScore,
+        change: newTotalScore - (startupData.currentScore || 0),
+        reason: `Email re-analyzed: ${adj.reasoning}`,
+        source: 'email_reanalysis',
+        emailId: emailId,
+        aiAnalysis: responseAnalysis.responseQuality,
+        recommendation: responseAnalysis.recommendation,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Update startup with new score and draft reply
+      await startupDoc.ref.update({
+        currentScore: newTotalScore,
+        scoreBreakdown: newBreakdown,
+        lastResponseAnalysis: {
+          quality: responseAnalysis.responseQuality,
+          recommendation: responseAnalysis.recommendation,
+          recommendationReason: responseAnalysis.recommendationReason,
+          suggestedQuestions: responseAnalysis.suggestedQuestions,
+          draftReply: responseAnalysis.draftReply,
+          analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log(`[Re-analyze] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore}`);
+    }
+
+    return res.json({
+      success: true,
+      analysis: {
+        responseQuality: responseAnalysis.responseQuality,
+        recommendation: responseAnalysis.recommendation,
+        recommendationReason: responseAnalysis.recommendationReason,
+        suggestedQuestions: responseAnalysis.suggestedQuestions,
+        draftReply: responseAnalysis.draftReply,
+        scoreAdjustment: responseAnalysis.scoreAdjustment,
+      },
+    });
+  } catch (error) {
+    console.error('[Re-analyze] Error:', error);
+    return res.status(500).json({ error: 'Failed to analyze email' });
+  }
+});
+
+// Generate AI reply draft for an email
+app.post('/emails/:emailId/generate-reply', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const emailId = req.params.emailId as string;
+
+    // Get the email
+    const emailDoc = await db.collection('emails').doc(emailId).get();
+    if (!emailDoc.exists) {
+      return res.status(404).json({ error: 'Email not found' });
+    }
+
+    const emailData = emailDoc.data()!;
+
+    // Only generate replies for inbound emails
+    if (emailData.direction !== 'inbound') {
+      return res.status(400).json({ error: 'Can only generate replies for inbound emails' });
+    }
+
+    // Get the associated startup
+    const startupId = emailData.startupId;
+    if (!startupId) {
+      return res.status(400).json({ error: 'Email is not linked to a startup' });
+    }
+
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    if (startupData.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Fetch all emails for conversation context (without orderBy to avoid index)
+    const allEmailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const allEmails = allEmailsSnapshot.docs
+      .map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          subject: data.subject || '',
+          body: data.body || '',
+          direction: data.direction || 'inbound',
+          date: data.date?.toDate?.() || new Date(data.date),
+        };
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    // Previous emails excludes the current one
+    const previousEmails = allEmails.filter(e => e.id !== emailId).slice(0, 10);
+
+    // Generate AI reply
+    console.log(`[Generate Reply] Generating reply for email ${emailId}, startup: ${startupData.name}`);
+    const responseAnalysis = await analyzeFounderResponse(
+      {
+        name: startupData.name,
+        description: startupData.description,
+        founderName: startupData.founderName,
+        stage: startupData.stage,
+        currentScore: startupData.currentScore,
+        scoreBreakdown: startupData.scoreBreakdown,
+        businessModelAnalysis: startupData.businessModelAnalysis,
+      },
+      {
+        subject: emailData.subject || '',
+        body: emailData.body || '',
+        from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
+      },
+      previousEmails
+    );
+
+    if (!responseAnalysis) {
+      return res.status(500).json({ error: 'Failed to generate reply. Please try again.' });
+    }
+
+    console.log(`[Generate Reply] Success - recommendation: ${responseAnalysis.recommendation}`);
+
+    return res.json({
+      success: true,
+      recommendation: responseAnalysis.recommendation,
+      recommendationReason: responseAnalysis.recommendationReason,
+      draftReply: responseAnalysis.draftReply,
+      suggestedQuestions: responseAnalysis.suggestedQuestions,
+      responseQuality: responseAnalysis.responseQuality,
+    });
+  } catch (error) {
+    console.error('[Generate Reply] Error:', error);
+    return res.status(500).json({ error: 'Failed to generate reply' });
+  }
 });
 
 // ==================== DECKS ROUTES ====================

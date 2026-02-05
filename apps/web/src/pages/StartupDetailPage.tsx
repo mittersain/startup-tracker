@@ -353,10 +353,57 @@ export default function StartupDetailPage() {
       setComposeSubject('');
       setComposeBody('');
       setReplyToEmail(null);
+      setReplyRecommendation(null);
       toast.success('Email sent and recorded');
     },
     onError: () => {
       toast.error('Failed to send email');
+    },
+  });
+
+  // Analyze email mutation - re-analyzes founder response with AI
+  const analyzeEmailMutation = useMutation({
+    mutationFn: (emailId: string) => emailsApi.analyze(emailId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      queryClient.invalidateQueries({ queryKey: ['emails', id] });
+      queryClient.invalidateQueries({ queryKey: ['startup-events', id] });
+      if (data.analysis?.recommendation) {
+        toast.success(`Analysis complete - AI recommends: ${data.analysis.recommendation.replace('_', ' ')}`);
+      } else {
+        toast.success('Email analyzed successfully');
+      }
+    },
+    onError: () => {
+      toast.error('Failed to analyze email');
+    },
+  });
+
+  // Generate AI reply mutation
+  const [replyRecommendation, setReplyRecommendation] = useState<{
+    recommendation: 'continue' | 'pass' | 'schedule_call';
+    recommendationReason: string;
+    suggestedQuestions: string[];
+    responseQuality?: {
+      score: number;
+      concerns: string[];
+      positives: string[];
+    };
+  } | null>(null);
+
+  const generateReplyMutation = useMutation({
+    mutationFn: (emailId: string) => emailsApi.generateReply(emailId),
+    onSuccess: (data) => {
+      setComposeBody(data.draftReply);
+      setReplyRecommendation({
+        recommendation: data.recommendation,
+        recommendationReason: data.recommendationReason,
+        suggestedQuestions: data.suggestedQuestions,
+        responseQuality: data.responseQuality,
+      });
+    },
+    onError: () => {
+      toast.error('Failed to generate AI reply. You can still compose manually.');
     },
   });
 
@@ -2325,20 +2372,41 @@ export default function StartupDetailPage() {
                           </p>
                         </div>
                         {email.direction === 'inbound' && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setIsComposingEmail(true);
-                              setReplyToEmail(email);
-                              setComposeSubject(`Re: ${email.subject}`);
-                              setComposeBody('');
-                            }}
-                            className="btn btn-secondary btn-sm flex items-center gap-1"
-                            title="Reply to this email"
-                          >
-                            <Send className="w-3 h-3" />
-                            Reply
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                analyzeEmailMutation.mutate(email.id);
+                              }}
+                              disabled={analyzeEmailMutation.isPending}
+                              className="btn btn-ghost btn-sm flex items-center gap-1 text-purple-600 hover:bg-purple-50"
+                              title="Analyze this email with AI"
+                            >
+                              {analyzeEmailMutation.isPending ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Brain className="w-3 h-3" />
+                              )}
+                              Analyze
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setIsComposingEmail(true);
+                                setReplyToEmail(email);
+                                setComposeSubject(`Re: ${email.subject}`);
+                                setComposeBody('');
+                                setReplyRecommendation(null);
+                                // Trigger AI to generate reply draft
+                                generateReplyMutation.mutate(email.id);
+                              }}
+                              className="btn btn-secondary btn-sm flex items-center gap-1"
+                              title="Reply to this email with AI assistance"
+                            >
+                              <Send className="w-3 h-3" />
+                              Reply
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -2435,19 +2503,39 @@ export default function StartupDetailPage() {
                 {/* Modal Footer */}
                 <div className="flex justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
                   {selectedEmail.direction === 'inbound' && (
-                    <button
-                      onClick={() => {
-                        setSelectedEmail(null);
-                        setIsComposingEmail(true);
-                        setReplyToEmail(selectedEmail);
-                        setComposeSubject(`Re: ${selectedEmail.subject}`);
-                        setComposeBody('');
-                      }}
-                      className="btn btn-primary flex items-center gap-2"
-                    >
-                      <Send className="w-4 h-4" />
-                      Reply
-                    </button>
+                    <>
+                      <button
+                        onClick={() => {
+                          analyzeEmailMutation.mutate(selectedEmail.id);
+                        }}
+                        disabled={analyzeEmailMutation.isPending}
+                        className="btn btn-ghost flex items-center gap-2 text-purple-600 hover:bg-purple-50"
+                      >
+                        {analyzeEmailMutation.isPending ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Brain className="w-4 h-4" />
+                        )}
+                        Analyze with AI
+                      </button>
+                      <button
+                        onClick={() => {
+                          const emailToReply = selectedEmail;
+                          setSelectedEmail(null);
+                          setIsComposingEmail(true);
+                          setReplyToEmail(emailToReply);
+                          setComposeSubject(`Re: ${emailToReply.subject}`);
+                          setComposeBody('');
+                          setReplyRecommendation(null);
+                          // Trigger AI to generate reply draft
+                          generateReplyMutation.mutate(emailToReply.id);
+                        }}
+                        className="btn btn-primary flex items-center gap-2"
+                      >
+                        <Send className="w-4 h-4" />
+                        Reply
+                      </button>
+                    </>
                   )}
                   <button
                     onClick={() => setSelectedEmail(null)}
@@ -2513,15 +2601,80 @@ export default function StartupDetailPage() {
                     </div>
                   )}
 
+                  {/* AI Recommendation Banner */}
+                  {replyToEmail && (generateReplyMutation.isPending || replyRecommendation) && (
+                    <div className={clsx(
+                      'rounded-lg p-4 border',
+                      generateReplyMutation.isPending ? 'bg-gray-50 border-gray-200' :
+                      replyRecommendation?.recommendation === 'continue' ? 'bg-green-50 border-green-200' :
+                      replyRecommendation?.recommendation === 'schedule_call' ? 'bg-blue-50 border-blue-200' :
+                      replyRecommendation?.recommendation === 'pass' ? 'bg-red-50 border-red-200' :
+                      'bg-gray-50 border-gray-200'
+                    )}>
+                      {generateReplyMutation.isPending ? (
+                        <div className="flex items-center gap-3">
+                          <Loader2 className="w-5 h-5 animate-spin text-primary-600" />
+                          <div>
+                            <p className="font-medium text-gray-700">Analyzing email & generating reply...</p>
+                            <p className="text-sm text-gray-500">AI is reviewing context and drafting response</p>
+                          </div>
+                        </div>
+                      ) : replyRecommendation && (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-2">
+                            <span className={clsx(
+                              'px-2 py-1 rounded-full text-xs font-semibold',
+                              replyRecommendation.recommendation === 'continue' ? 'bg-green-100 text-green-700' :
+                              replyRecommendation.recommendation === 'schedule_call' ? 'bg-blue-100 text-blue-700' :
+                              'bg-red-100 text-red-700'
+                            )}>
+                              {replyRecommendation.recommendation === 'continue' ? '✓ Continue Discussion' :
+                               replyRecommendation.recommendation === 'schedule_call' ? '📞 Schedule Call' :
+                               '✗ Consider Passing'}
+                            </span>
+                            {replyRecommendation.responseQuality && (
+                              <span className="text-xs text-gray-500">
+                                Response Quality: {replyRecommendation.responseQuality.score}/10
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-sm text-gray-700">{replyRecommendation.recommendationReason}</p>
+
+                          {replyRecommendation.suggestedQuestions && replyRecommendation.suggestedQuestions.length > 0 && (
+                            <details className="text-sm">
+                              <summary className="cursor-pointer text-primary-600 hover:text-primary-700 font-medium">
+                                Suggested follow-up questions ({replyRecommendation.suggestedQuestions.length})
+                              </summary>
+                              <ul className="mt-2 space-y-1 pl-4">
+                                {replyRecommendation.suggestedQuestions.map((q, i) => (
+                                  <li key={i} className="text-gray-600 list-disc">{q}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Body */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
-                    <textarea
-                      value={composeBody}
-                      onChange={(e) => setComposeBody(e.target.value)}
-                      className="input min-h-[200px] resize-y"
-                      placeholder="Write your message..."
-                    />
+                    {generateReplyMutation.isPending ? (
+                      <div className="input min-h-[200px] bg-gray-50 flex items-center justify-center">
+                        <div className="text-center text-gray-500">
+                          <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
+                          <p>Generating AI draft...</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <textarea
+                        value={composeBody}
+                        onChange={(e) => setComposeBody(e.target.value)}
+                        className="input min-h-[200px] resize-y"
+                        placeholder="Write your message..."
+                      />
+                    )}
                   </div>
                 </div>
 
@@ -2531,6 +2684,7 @@ export default function StartupDetailPage() {
                     onClick={() => {
                       setIsComposingEmail(false);
                       setReplyToEmail(null);
+                      setReplyRecommendation(null);
                     }}
                     className="btn btn-secondary"
                   >
