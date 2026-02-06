@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { startupsApi, decksApi, emailsApi } from '@/services/api';
+import { startupsApi, decksApi, emailsApi, commentsApi, invitesApi, usersApi } from '@/services/api';
 import { useAuthStore } from '@/stores/auth.store';
 import { useDropzone } from 'react-dropzone';
 import DOMPurify from 'isomorphic-dompurify';
@@ -105,7 +105,7 @@ export default function StartupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'research' | 'deck' | 'emails' | 'events'>('analysis');
+  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'research' | 'deck' | 'emails' | 'events' | 'comments'>('analysis');
   const [copiedReply, setCopiedReply] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isEditingReply, setIsEditingReply] = useState(false);
@@ -178,6 +178,26 @@ export default function StartupDetailPage() {
       const data = query.state.data as { status?: string } | undefined;
       return data?.status === 'in_progress' ? 5000 : false;
     },
+  });
+
+  // Fetch comments for team discussion
+  const { data: commentsData } = useQuery({
+    queryKey: ['startup-comments', id],
+    queryFn: () => commentsApi.getByStartup(id!),
+    enabled: !!id,
+  });
+
+  // Fetch team members for @mentions
+  const { data: teamData } = useQuery({
+    queryKey: ['team-users'],
+    queryFn: () => usersApi.listForMentions(),
+  });
+
+  // Fetch invites for this deal
+  const { data: invitesData } = useQuery({
+    queryKey: ['startup-invites', id],
+    queryFn: () => invitesApi.getByStartup(id!),
+    enabled: !!id,
   });
 
   // Update chat messages when history loads
@@ -404,6 +424,79 @@ export default function StartupDetailPage() {
     },
     onError: () => {
       toast.error('Failed to generate AI reply. You can still compose manually.');
+    },
+  });
+
+  // Comments state and mutations
+  const [newComment, setNewComment] = useState('');
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+  const [editingComment, setEditingComment] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteAccessLevel, setInviteAccessLevel] = useState<'view' | 'comment'>('comment');
+
+  const addCommentMutation = useMutation({
+    mutationFn: (data: { content: string; parentId?: string; mentions?: string[] }) =>
+      commentsApi.add(id!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-comments', id] });
+      setNewComment('');
+      setReplyingTo(null);
+      toast.success('Comment added');
+    },
+    onError: () => {
+      toast.error('Failed to add comment');
+    },
+  });
+
+  const updateCommentMutation = useMutation({
+    mutationFn: ({ commentId, content }: { commentId: string; content: string }) =>
+      commentsApi.update(commentId, content),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-comments', id] });
+      setEditingComment(null);
+      setEditContent('');
+      toast.success('Comment updated');
+    },
+    onError: () => {
+      toast.error('Failed to update comment');
+    },
+  });
+
+  const deleteCommentMutation = useMutation({
+    mutationFn: (commentId: string) => commentsApi.delete(commentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-comments', id] });
+      toast.success('Comment deleted');
+    },
+    onError: () => {
+      toast.error('Failed to delete comment');
+    },
+  });
+
+  const sendInviteMutation = useMutation({
+    mutationFn: (data: { email: string; accessLevel: 'view' | 'comment' }) =>
+      invitesApi.send(id!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-invites', id] });
+      setShowInviteModal(false);
+      setInviteEmail('');
+      toast.success('Invite sent!');
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to send invite');
+    },
+  });
+
+  const revokeInviteMutation = useMutation({
+    mutationFn: (inviteId: string) => invitesApi.revoke(id!, inviteId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup-invites', id] });
+      toast.success('Invite revoked');
+    },
+    onError: () => {
+      toast.error('Failed to revoke invite');
     },
   });
 
@@ -781,6 +874,7 @@ export default function StartupDetailPage() {
             { id: 'research', label: 'Research', icon: Sparkles },
             { id: 'deck', label: 'Docs', icon: FileText },
             { id: 'emails', label: 'Emails', icon: Mail },
+            { id: 'comments', label: 'Team', icon: MessageSquare },
             { id: 'events', label: 'Events', icon: Clock },
           ].map((tab) => (
             <button
@@ -2730,6 +2824,309 @@ export default function StartupDetailPage() {
             </div>
           )}
         </>
+      )}
+
+      {activeTab === 'comments' && (
+        <div className="space-y-6">
+          {/* Invite Co-investors Section */}
+          <div className="card p-4">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-semibold text-gray-900">Co-Investors</h3>
+                <p className="text-sm text-gray-500">Invite external co-investors to view and discuss this deal</p>
+              </div>
+              <button
+                onClick={() => setShowInviteModal(true)}
+                className="btn btn-primary btn-sm"
+              >
+                Invite Co-investor
+              </button>
+            </div>
+            {(invitesData?.invites?.length ?? 0) > 0 ? (
+              <div className="space-y-2">
+                {invitesData?.invites.map((invite: { id: string; email: string; accessLevel: string; acceptedAt?: string; createdAt: string }) => (
+                  <div key={invite.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">
+                        <User className="w-4 h-4 text-primary-600" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{invite.email}</p>
+                        <p className="text-xs text-gray-500">
+                          {invite.accessLevel === 'comment' ? 'Can view & comment' : 'View only'}
+                          {invite.acceptedAt && ' · Accessed'}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => revokeInviteMutation.mutate(invite.id)}
+                      className="text-sm text-danger-600 hover:text-danger-700"
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No co-investors invited yet</p>
+            )}
+          </div>
+
+          {/* Team Discussion */}
+          <div className="card p-4">
+            <h3 className="font-semibold text-gray-900 mb-4">Team Discussion</h3>
+
+            {/* Comment Input */}
+            <div className="mb-6">
+              <textarea
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                placeholder="Add a comment... Use @name to mention team members"
+                className="input w-full min-h-[80px] resize-none"
+                rows={3}
+              />
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-xs text-gray-500">
+                  Team members: {teamData?.users?.map((u: { name: string }) => `@${u.name}`).join(', ') || 'Loading...'}
+                </p>
+                <button
+                  onClick={() => {
+                    if (newComment.trim()) {
+                      // Extract mentions from comment (simple @name pattern)
+                      const mentionPattern = /@(\w+)/g;
+                      const mentionNames = [...newComment.matchAll(mentionPattern)].map(m => m[1]);
+                      const mentionedUserIds = teamData?.users
+                        ?.filter((u: { name: string; id: string }) =>
+                          mentionNames.some(name => u.name.toLowerCase().includes(name.toLowerCase()))
+                        )
+                        .map((u: { id: string }) => u.id) || [];
+
+                      addCommentMutation.mutate({
+                        content: newComment,
+                        parentId: replyingTo || undefined,
+                        mentions: mentionedUserIds,
+                      });
+                    }
+                  }}
+                  disabled={!newComment.trim() || addCommentMutation.isPending}
+                  className="btn btn-primary btn-sm"
+                >
+                  {addCommentMutation.isPending ? 'Posting...' : 'Post Comment'}
+                </button>
+              </div>
+            </div>
+
+            {/* Comments List */}
+            <div className="space-y-4">
+              {(commentsData?.comments?.length ?? 0) > 0 ? (
+                commentsData?.comments
+                  .filter((c: { parentId: string | null }) => !c.parentId) // Top-level comments only
+                  .map((comment: {
+                    id: string;
+                    authorName: string;
+                    authorEmail: string;
+                    content: string;
+                    isCoInvestor?: boolean;
+                    createdAt: string;
+                    editedAt?: string;
+                    authorId: string;
+                  }) => {
+                    const { user } = useAuthStore.getState();
+                    const isOwner = comment.authorId === user?.id || comment.authorId === `user:${user?.id}`;
+                    const replies = commentsData?.comments.filter((c: { parentId: string | null }) => c.parentId === comment.id) || [];
+
+                    return (
+                      <div key={comment.id} className="border-b border-gray-100 pb-4 last:border-0">
+                        <div className="flex items-start gap-3">
+                          <div className={clsx(
+                            "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
+                            comment.isCoInvestor ? "bg-orange-100" : "bg-primary-100"
+                          )}>
+                            <span className={clsx(
+                              "text-sm font-medium",
+                              comment.isCoInvestor ? "text-orange-600" : "text-primary-600"
+                            )}>
+                              {comment.authorName.charAt(0).toUpperCase()}
+                            </span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-gray-900">{comment.authorName}</span>
+                              {comment.isCoInvestor && (
+                                <span className="badge bg-orange-100 text-orange-700 text-xs">Co-investor</span>
+                              )}
+                              <span className="text-xs text-gray-500">
+                                {format(new Date(comment.createdAt), 'MMM d, h:mm a')}
+                                {comment.editedAt && ' (edited)'}
+                              </span>
+                            </div>
+
+                            {editingComment === comment.id ? (
+                              <div className="mt-2">
+                                <textarea
+                                  value={editContent}
+                                  onChange={(e) => setEditContent(e.target.value)}
+                                  className="input w-full min-h-[60px] resize-none"
+                                  rows={2}
+                                />
+                                <div className="flex gap-2 mt-2">
+                                  <button
+                                    onClick={() => updateCommentMutation.mutate({ commentId: comment.id, content: editContent })}
+                                    disabled={updateCommentMutation.isPending}
+                                    className="btn btn-primary btn-sm"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={() => { setEditingComment(null); setEditContent(''); }}
+                                    className="btn btn-secondary btn-sm"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-gray-700 mt-1 whitespace-pre-wrap">{comment.content}</p>
+                            )}
+
+                            {!editingComment && (
+                              <div className="flex items-center gap-3 mt-2">
+                                <button
+                                  onClick={() => {
+                                    setReplyingTo(comment.id);
+                                    setNewComment(`@${comment.authorName} `);
+                                  }}
+                                  className="text-xs text-gray-500 hover:text-gray-700"
+                                >
+                                  Reply
+                                </button>
+                                {isOwner && (
+                                  <>
+                                    <button
+                                      onClick={() => { setEditingComment(comment.id); setEditContent(comment.content); }}
+                                      className="text-xs text-gray-500 hover:text-gray-700"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        if (confirm('Delete this comment?')) {
+                                          deleteCommentMutation.mutate(comment.id);
+                                        }
+                                      }}
+                                      className="text-xs text-danger-500 hover:text-danger-700"
+                                    >
+                                      Delete
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Replies */}
+                            {replies.length > 0 && (
+                              <div className="mt-4 ml-4 pl-4 border-l-2 border-gray-200 space-y-3">
+                                {replies.map((reply: typeof comment) => (
+                                  <div key={reply.id} className="flex items-start gap-2">
+                                    <div className={clsx(
+                                      "w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0",
+                                      reply.isCoInvestor ? "bg-orange-100" : "bg-gray-100"
+                                    )}>
+                                      <span className="text-xs font-medium text-gray-600">
+                                        {reply.authorName.charAt(0).toUpperCase()}
+                                      </span>
+                                    </div>
+                                    <div>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-sm font-medium text-gray-900">{reply.authorName}</span>
+                                        {reply.isCoInvestor && (
+                                          <span className="badge bg-orange-100 text-orange-700 text-xs">Co-investor</span>
+                                        )}
+                                        <span className="text-xs text-gray-500">
+                                          {format(new Date(reply.createdAt), 'MMM d, h:mm a')}
+                                        </span>
+                                      </div>
+                                      <p className="text-sm text-gray-700 mt-0.5">{reply.content}</p>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+              ) : (
+                <p className="text-center text-gray-500 py-8">
+                  No comments yet. Start the discussion!
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Invite Modal */}
+          {showInviteModal && (
+            <div className="fixed inset-0 z-50 overflow-y-auto">
+              <div className="fixed inset-0 bg-black bg-opacity-50" onClick={() => setShowInviteModal(false)} />
+              <div className="flex min-h-full items-center justify-center p-4">
+                <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">Invite Co-investor</h3>
+                    <button onClick={() => setShowInviteModal(false)} className="text-gray-400 hover:text-gray-600">
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+                      <input
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="co-investor@example.com"
+                        className="input w-full"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Access Level</label>
+                      <select
+                        value={inviteAccessLevel}
+                        onChange={(e) => setInviteAccessLevel(e.target.value as 'view' | 'comment')}
+                        className="input w-full"
+                      >
+                        <option value="comment">Can view & comment</option>
+                        <option value="view">View only</option>
+                      </select>
+                    </div>
+
+                    <p className="text-sm text-gray-500">
+                      They'll receive an email with a magic link to access this deal. No password required.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-3 mt-6">
+                    <button
+                      onClick={() => setShowInviteModal(false)}
+                      className="btn btn-secondary flex-1"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => sendInviteMutation.mutate({ email: inviteEmail, accessLevel: inviteAccessLevel })}
+                      disabled={!inviteEmail.trim() || sendInviteMutation.isPending}
+                      className="btn btn-primary flex-1"
+                    >
+                      {sendInviteMutation.isPending ? 'Sending...' : 'Send Invite'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {activeTab === 'events' && (

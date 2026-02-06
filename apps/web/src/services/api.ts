@@ -535,4 +535,84 @@ export const usersApi = {
   delete: async (id: string) => {
     await api.delete(`/users/${id}`);
   },
+
+  // Get users for @mentions
+  listForMentions: async () => {
+    const response = await api.get('/users/list');
+    return response.data;
+  },
+};
+
+// Comments API
+export const commentsApi = {
+  getByStartup: async (startupId: string) => {
+    const response = await api.get(`/startups/${startupId}/comments`);
+    return response.data;
+  },
+
+  add: async (startupId: string, data: { content: string; parentId?: string; mentions?: string[] }) => {
+    const response = await api.post(`/startups/${startupId}/comments`, data);
+    return response.data;
+  },
+
+  update: async (commentId: string, content: string) => {
+    const response = await api.put(`/comments/${commentId}`, { content });
+    return response.data;
+  },
+
+  delete: async (commentId: string) => {
+    await api.delete(`/comments/${commentId}`);
+  },
+};
+
+// Deal Invites API (for co-investors)
+export const invitesApi = {
+  getByStartup: async (startupId: string) => {
+    const response = await api.get(`/startups/${startupId}/invites`);
+    return response.data;
+  },
+
+  send: async (startupId: string, data: { email: string; accessLevel: 'view' | 'comment' }) => {
+    const response = await api.post(`/startups/${startupId}/invite`, data);
+    return response.data;
+  },
+
+  revoke: async (startupId: string, inviteId: string) => {
+    await api.delete(`/startups/${startupId}/invite/${inviteId}`);
+  },
+
+  // Magic link validation (no auth required)
+  validateToken: async (token: string) => {
+    const response = await api.get(`/invite/${token}`);
+    return response.data;
+  },
+
+  // Add comment via magic link (no auth required)
+  addCommentViaToken: async (token: string, data: { content: string; name?: string }) => {
+    const response = await api.post(`/invite/${token}/comment`, data);
+    return response.data;
+  },
+};
+
+// Notifications API
+export const notificationsApi = {
+  list: async (params?: { limit?: number }) => {
+    const response = await api.get('/notifications', { params });
+    return response.data;
+  },
+
+  getUnreadCount: async () => {
+    const response = await api.get('/notifications/unread-count');
+    return response.data;
+  },
+
+  markAsRead: async (notificationId: string) => {
+    const response = await api.put(`/notifications/${notificationId}/read`);
+    return response.data;
+  },
+
+  markAllAsRead: async () => {
+    const response = await api.put('/notifications/read-all');
+    return response.data;
+  },
 };

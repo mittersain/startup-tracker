@@ -5687,6 +5687,628 @@ app.get('/backup/status', authenticate, async (_req, res) => {
   return res.json({ enabled: false, database: 'firestore' });
 });
 
+// ==================== COMMENTS ROUTES ====================
+
+// Get comments for a startup
+app.get('/startups/:id/comments', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+
+    // Verify startup exists and user has access
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get all comments for this startup
+    const commentsSnapshot = await db.collection('comments')
+      .where('startupId', '==', startupId)
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    const comments = commentsSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || doc.data().createdAt,
+      updatedAt: doc.data().updatedAt?.toDate?.()?.toISOString() || doc.data().updatedAt,
+    }));
+
+    // Sort by createdAt ascending (oldest first for threading)
+    comments.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    return res.json({ comments });
+  } catch (error) {
+    console.error('[Comments] Error fetching comments:', error);
+    return res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+// Add a comment
+app.post('/startups/:id/comments', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const { content, parentId, mentions } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment content is required' });
+    }
+
+    // Verify startup exists and user has access
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get user info for author details
+    const userDoc = await db.collection('users').doc(req.user!.userId).get();
+    const userData = userDoc.data();
+
+    const commentRef = db.collection('comments').doc();
+    const comment = {
+      startupId,
+      organizationId: req.user!.organizationId,
+      authorId: req.user!.userId,
+      authorName: userData?.name || 'Unknown User',
+      authorEmail: userData?.email || '',
+      content: content.trim(),
+      parentId: parentId || null,
+      mentions: mentions || [],
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await commentRef.set(comment);
+
+    // Create notifications for mentioned users
+    if (mentions && mentions.length > 0) {
+      for (const mentionedUserId of mentions) {
+        if (mentionedUserId !== req.user!.userId) {
+          const notifRef = db.collection('notifications').doc();
+          await notifRef.set({
+            userId: mentionedUserId,
+            organizationId: req.user!.organizationId,
+            type: 'mention',
+            startupId,
+            startupName: startup.name,
+            referenceId: commentRef.id,
+            message: `${userData?.name || 'Someone'} mentioned you in a comment on ${startup.name}`,
+            isRead: false,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      comment: {
+        id: commentRef.id,
+        ...comment,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[Comments] Error adding comment:', error);
+    return res.status(500).json({ error: 'Failed to add comment' });
+  }
+});
+
+// Update a comment
+app.put('/comments/:id', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const commentId = req.params.id as string;
+    const { content } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment content is required' });
+    }
+
+    const commentDoc = await db.collection('comments').doc(commentId).get();
+    if (!commentDoc.exists) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+
+    const comment = commentDoc.data()!;
+
+    // Only author can edit their own comment
+    if (comment.authorId !== req.user!.userId) {
+      return res.status(403).json({ error: 'You can only edit your own comments' });
+    }
+
+    await db.collection('comments').doc(commentId).update({
+      content: content.trim(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      editedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Comments] Error updating comment:', error);
+    return res.status(500).json({ error: 'Failed to update comment' });
+  }
+});
+
+// Delete a comment
+app.delete('/comments/:id', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const commentId = req.params.id as string;
+
+    const commentDoc = await db.collection('comments').doc(commentId).get();
+    if (!commentDoc.exists) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+
+    const comment = commentDoc.data()!;
+
+    // Only author or admin can delete
+    if (comment.authorId !== req.user!.userId && req.user!.role !== 'admin') {
+      return res.status(403).json({ error: 'You can only delete your own comments' });
+    }
+
+    await db.collection('comments').doc(commentId).delete();
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Comments] Error deleting comment:', error);
+    return res.status(500).json({ error: 'Failed to delete comment' });
+  }
+});
+
+// ==================== DEAL INVITES ROUTES ====================
+
+// Get invites for a startup
+app.get('/startups/:id/invites', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+
+    // Verify startup exists and user has access
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const invitesSnapshot = await db.collection('deal_invites')
+      .where('startupId', '==', startupId)
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    const invites = invitesSnapshot.docs.map(doc => ({
+      id: doc.id,
+      email: doc.data().email,
+      accessLevel: doc.data().accessLevel,
+      invitedBy: doc.data().invitedByName,
+      acceptedAt: doc.data().acceptedAt?.toDate?.()?.toISOString() || null,
+      createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || doc.data().createdAt,
+    }));
+
+    return res.json({ invites });
+  } catch (error) {
+    console.error('[Invites] Error fetching invites:', error);
+    return res.status(500).json({ error: 'Failed to fetch invites' });
+  }
+});
+
+// Send invite to co-investor
+app.post('/startups/:id/invite', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const { email, accessLevel } = req.body;
+
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const validAccessLevels = ['view', 'comment'];
+    if (!accessLevel || !validAccessLevels.includes(accessLevel)) {
+      return res.status(400).json({ error: 'Invalid access level' });
+    }
+
+    // Verify startup exists and user has access
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Check if invite already exists
+    const existingInvite = await db.collection('deal_invites')
+      .where('startupId', '==', startupId)
+      .where('email', '==', email.toLowerCase())
+      .get();
+
+    if (!existingInvite.empty) {
+      return res.status(400).json({ error: 'This email has already been invited to this deal' });
+    }
+
+    // Get user info
+    const userDoc = await db.collection('users').doc(req.user!.userId).get();
+    const userData = userDoc.data();
+
+    // Generate magic link token
+    const token = require('crypto').randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30); // 30 day expiry
+
+    const inviteRef = db.collection('deal_invites').doc();
+    await inviteRef.set({
+      startupId,
+      organizationId: req.user!.organizationId,
+      email: email.toLowerCase(),
+      accessLevel,
+      token,
+      invitedBy: req.user!.userId,
+      invitedByName: userData?.name || 'Unknown',
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
+      acceptedAt: null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Generate magic link URL
+    const baseUrl = 'https://startup-tracker-app.web.app';
+    const magicLink = `${baseUrl}/invite/${token}`;
+
+    // Send email invitation
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER || 'nitishvm@gmail.com',
+        pass: process.env.SMTP_PASSWORD,
+      },
+    });
+
+    try {
+      await transporter.sendMail({
+        from: `"${userData?.name || 'Startup Tracker'}" <${process.env.SMTP_USER || 'nitishvm@gmail.com'}>`,
+        to: email,
+        subject: `You've been invited to view ${startup.name}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>You've been invited to view a deal</h2>
+            <p>${userData?.name || 'Someone'} has invited you to ${accessLevel === 'comment' ? 'view and comment on' : 'view'} <strong>${startup.name}</strong>.</p>
+            <p style="margin: 24px 0;">
+              <a href="${magicLink}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">View Deal</a>
+            </p>
+            <p style="color: #666; font-size: 14px;">This link expires in 30 days.</p>
+          </div>
+        `,
+      });
+      console.log(`[Invites] Sent invite email to ${email}`);
+    } catch (emailError) {
+      console.error('[Invites] Failed to send email:', emailError);
+      // Continue - invite is still created
+    }
+
+    return res.json({
+      success: true,
+      invite: {
+        id: inviteRef.id,
+        email: email.toLowerCase(),
+        accessLevel,
+        magicLink,
+      },
+    });
+  } catch (error) {
+    console.error('[Invites] Error sending invite:', error);
+    return res.status(500).json({ error: 'Failed to send invite' });
+  }
+});
+
+// Validate magic link and get deal access
+app.get('/invite/:token', async (req, res) => {
+  try {
+    const token = req.params.token as string;
+
+    const inviteSnapshot = await db.collection('deal_invites')
+      .where('token', '==', token)
+      .limit(1)
+      .get();
+
+    if (inviteSnapshot.empty) {
+      return res.status(404).json({ error: 'Invalid or expired invite link' });
+    }
+
+    const inviteDoc = inviteSnapshot.docs[0];
+    const invite = inviteDoc.data();
+
+    // Check expiry
+    const expiresAt = invite.expiresAt?.toDate?.() || new Date(invite.expiresAt);
+    if (new Date() > expiresAt) {
+      return res.status(410).json({ error: 'This invite link has expired' });
+    }
+
+    // Get startup details
+    const startupDoc = await db.collection('startups').doc(invite.startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Deal not found' });
+    }
+
+    const startup = startupDoc.data()!;
+
+    // Mark as accepted if first time
+    if (!invite.acceptedAt) {
+      await inviteDoc.ref.update({
+        acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // Get comments if access level allows
+    let comments: Array<Record<string, unknown>> = [];
+    if (invite.accessLevel === 'comment') {
+      const commentsSnapshot = await db.collection('comments')
+        .where('startupId', '==', invite.startupId)
+        .get();
+
+      comments = commentsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        authorName: doc.data().authorName,
+        content: doc.data().content,
+        parentId: doc.data().parentId,
+        createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || doc.data().createdAt,
+      }));
+      comments.sort((a, b) => new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime());
+    }
+
+    return res.json({
+      success: true,
+      accessLevel: invite.accessLevel,
+      inviteId: inviteDoc.id,
+      startup: {
+        id: startupDoc.id,
+        name: startup.name,
+        description: startup.description,
+        website: startup.website,
+        stage: startup.stage,
+        sector: startup.sector,
+        currentScore: startup.currentScore,
+        status: startup.status,
+        founderName: startup.founderName,
+      },
+      comments,
+    });
+  } catch (error) {
+    console.error('[Invites] Error validating invite:', error);
+    return res.status(500).json({ error: 'Failed to validate invite' });
+  }
+});
+
+// Add comment via magic link (for co-investors)
+app.post('/invite/:token/comment', async (req, res) => {
+  try {
+    const token = req.params.token as string;
+    const { content, name } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Comment content is required' });
+    }
+
+    const inviteSnapshot = await db.collection('deal_invites')
+      .where('token', '==', token)
+      .limit(1)
+      .get();
+
+    if (inviteSnapshot.empty) {
+      return res.status(404).json({ error: 'Invalid or expired invite link' });
+    }
+
+    const inviteDoc = inviteSnapshot.docs[0];
+    const invite = inviteDoc.data();
+
+    // Check expiry
+    const expiresAt = invite.expiresAt?.toDate?.() || new Date(invite.expiresAt);
+    if (new Date() > expiresAt) {
+      return res.status(410).json({ error: 'This invite link has expired' });
+    }
+
+    // Check access level
+    if (invite.accessLevel !== 'comment') {
+      return res.status(403).json({ error: 'You do not have permission to comment' });
+    }
+
+    // Get startup for notification
+    const startupDoc = await db.collection('startups').doc(invite.startupId).get();
+    const startup = startupDoc.data();
+
+    const commentRef = db.collection('comments').doc();
+    const comment = {
+      startupId: invite.startupId,
+      organizationId: invite.organizationId,
+      authorId: `invite:${inviteDoc.id}`,
+      authorName: name || invite.email.split('@')[0],
+      authorEmail: invite.email,
+      isCoInvestor: true,
+      content: content.trim(),
+      parentId: null,
+      mentions: [],
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await commentRef.set(comment);
+
+    // Notify the person who sent the invite
+    const notifRef = db.collection('notifications').doc();
+    await notifRef.set({
+      userId: invite.invitedBy,
+      organizationId: invite.organizationId,
+      type: 'comment',
+      startupId: invite.startupId,
+      startupName: startup?.name || 'Unknown',
+      referenceId: commentRef.id,
+      message: `${comment.authorName} (co-investor) commented on ${startup?.name || 'a deal'}`,
+      isRead: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      comment: {
+        id: commentRef.id,
+        authorName: comment.authorName,
+        content: comment.content,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[Invites] Error adding comment:', error);
+    return res.status(500).json({ error: 'Failed to add comment' });
+  }
+});
+
+// Revoke invite
+app.delete('/startups/:id/invite/:inviteId', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const inviteId = req.params.inviteId as string;
+
+    // Verify startup exists and user has access
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    await db.collection('deal_invites').doc(inviteId).delete();
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Invites] Error revoking invite:', error);
+    return res.status(500).json({ error: 'Failed to revoke invite' });
+  }
+});
+
+// ==================== NOTIFICATIONS ROUTES ====================
+
+// Get notifications for current user
+app.get('/notifications', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+
+    const notificationsSnapshot = await db.collection('notifications')
+      .where('userId', '==', req.user!.userId)
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    const notifications = notificationsSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || doc.data().createdAt,
+    }));
+
+    // Sort by createdAt descending and limit
+    notifications.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const limitedNotifications = notifications.slice(0, limit);
+
+    return res.json({ notifications: limitedNotifications });
+  } catch (error) {
+    console.error('[Notifications] Error fetching notifications:', error);
+    return res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// Get unread notification count
+app.get('/notifications/unread-count', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const notificationsSnapshot = await db.collection('notifications')
+      .where('userId', '==', req.user!.userId)
+      .where('organizationId', '==', req.user!.organizationId)
+      .where('isRead', '==', false)
+      .get();
+
+    return res.json({ count: notificationsSnapshot.size });
+  } catch (error) {
+    console.error('[Notifications] Error fetching unread count:', error);
+    return res.status(500).json({ error: 'Failed to fetch notification count' });
+  }
+});
+
+// Mark notification as read
+app.put('/notifications/:id/read', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const notificationId = req.params.id as string;
+
+    const notifDoc = await db.collection('notifications').doc(notificationId).get();
+    if (!notifDoc.exists) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
+
+    const notif = notifDoc.data()!;
+    if (notif.userId !== req.user!.userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    await db.collection('notifications').doc(notificationId).update({ isRead: true });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Notifications] Error marking notification as read:', error);
+    return res.status(500).json({ error: 'Failed to mark notification as read' });
+  }
+});
+
+// Mark all notifications as read
+app.put('/notifications/read-all', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const notificationsSnapshot = await db.collection('notifications')
+      .where('userId', '==', req.user!.userId)
+      .where('organizationId', '==', req.user!.organizationId)
+      .where('isRead', '==', false)
+      .get();
+
+    const batch = db.batch();
+    notificationsSnapshot.docs.forEach(doc => {
+      batch.update(doc.ref, { isRead: true });
+    });
+    await batch.commit();
+
+    return res.json({ success: true, count: notificationsSnapshot.size });
+  } catch (error) {
+    console.error('[Notifications] Error marking all as read:', error);
+    return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+  }
+});
+
+// Get list of users in organization (for @mentions)
+app.get('/users/list', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const usersSnapshot = await db.collection('users')
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    const users = usersSnapshot.docs.map(doc => ({
+      id: doc.id,
+      name: doc.data().name,
+      email: doc.data().email,
+      role: doc.data().role,
+    }));
+
+    return res.json({ users });
+  } catch (error) {
+    console.error('[Users] Error fetching users:', error);
+    return res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
 // Catch-all for unhandled routes
 app.use('*', (req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.originalUrl} not found` });
