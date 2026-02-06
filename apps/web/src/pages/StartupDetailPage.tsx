@@ -638,7 +638,8 @@ export default function StartupDetailPage() {
               <div className="space-y-3">
                 {(['team', 'market', 'product', 'traction', 'deal'] as const).map((key) => {
                   const category = breakdown[key];
-                  const total = category.base + category.adjusted;
+                  if (!category) return null;  // Skip if category is undefined
+                  const total = (category.base ?? 0) + (category.adjusted ?? 0);
                   const maxScore = key === 'deal' ? 10 : key === 'product' || key === 'traction' ? 20 : 25;
                   const percentage = (total / maxScore) * 100;
 
@@ -670,27 +671,27 @@ export default function StartupDetailPage() {
 
               {/* Additional signals */}
               <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-200">
-                {breakdown.communication !== 0 && (
+                {(breakdown.communication ?? 0) !== 0 && (
                   <div className="flex items-center gap-1 text-sm">
                     <Mail className="w-4 h-4 text-primary-500" />
-                    <span className={breakdown.communication > 0 ? 'text-success-600' : 'text-danger-600'}>
-                      {breakdown.communication > 0 ? '+' : ''}{breakdown.communication.toFixed(1)} comm
+                    <span className={(breakdown.communication ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
+                      {(breakdown.communication ?? 0) > 0 ? '+' : ''}{(breakdown.communication ?? 0).toFixed(1)} comm
                     </span>
                   </div>
                 )}
-                {breakdown.momentum !== 0 && (
+                {(breakdown.momentum ?? 0) !== 0 && (
                   <div className="flex items-center gap-1 text-sm">
                     <TrendingUp className="w-4 h-4 text-primary-500" />
-                    <span className={breakdown.momentum > 0 ? 'text-success-600' : 'text-danger-600'}>
-                      {breakdown.momentum > 0 ? '+' : ''}{breakdown.momentum.toFixed(1)} momentum
+                    <span className={(breakdown.momentum ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
+                      {(breakdown.momentum ?? 0) > 0 ? '+' : ''}{(breakdown.momentum ?? 0).toFixed(1)} momentum
                     </span>
                   </div>
                 )}
-                {breakdown.redFlags !== 0 && (
+                {(breakdown.redFlags ?? 0) !== 0 && (
                   <div className="flex items-center gap-1 text-sm">
                     <AlertTriangle className="w-4 h-4 text-danger-500" />
                     <span className="text-danger-600">
-                      {breakdown.redFlags.toFixed(1)} red flags
+                      {(breakdown.redFlags ?? 0).toFixed(1)} red flags
                     </span>
                   </div>
                 )}
@@ -711,13 +712,13 @@ export default function StartupDetailPage() {
                     const score = startup.currentScore ?? 0;
                     const breakdown = startup.scoreBreakdown as ScoreBreakdown;
 
-                    // Identify strongest and weakest areas
+                    // Identify strongest and weakest areas (with null checks)
                     const categories = [
-                      { name: 'Team', score: breakdown.team.base + breakdown.team.adjusted, max: 25 },
-                      { name: 'Market', score: breakdown.market.base + breakdown.market.adjusted, max: 25 },
-                      { name: 'Product', score: breakdown.product.base + breakdown.product.adjusted, max: 20 },
-                      { name: 'Traction', score: breakdown.traction.base + breakdown.traction.adjusted, max: 20 },
-                      { name: 'Deal', score: breakdown.deal.base + breakdown.deal.adjusted, max: 10 },
+                      { name: 'Team', score: (breakdown.team?.base ?? 0) + (breakdown.team?.adjusted ?? 0), max: 25 },
+                      { name: 'Market', score: (breakdown.market?.base ?? 0) + (breakdown.market?.adjusted ?? 0), max: 25 },
+                      { name: 'Product', score: (breakdown.product?.base ?? 0) + (breakdown.product?.adjusted ?? 0), max: 20 },
+                      { name: 'Traction', score: (breakdown.traction?.base ?? 0) + (breakdown.traction?.adjusted ?? 0), max: 20 },
+                      { name: 'Deal', score: (breakdown.deal?.base ?? 0) + (breakdown.deal?.adjusted ?? 0), max: 10 },
                     ];
 
                     const sortedByPercentage = [...categories].sort((a, b) => (b.score / b.max) - (a.score / a.max));
@@ -750,16 +751,16 @@ export default function StartupDetailPage() {
                       parts.push(`with balanced scores across categories.`);
                     }
 
-                    // Communication bonus
-                    if (breakdown.communication > 2) {
-                      parts.push(`Strong founder communication adds +${breakdown.communication.toFixed(1)} points.`);
-                    } else if (breakdown.communication < -2) {
-                      parts.push(`Poor communication responsiveness deducts ${Math.abs(breakdown.communication).toFixed(1)} points.`);
+                    // Communication bonus (with null checks)
+                    if ((breakdown.communication ?? 0) > 2) {
+                      parts.push(`Strong founder communication adds +${(breakdown.communication ?? 0).toFixed(1)} points.`);
+                    } else if ((breakdown.communication ?? 0) < -2) {
+                      parts.push(`Poor communication responsiveness deducts ${Math.abs(breakdown.communication ?? 0).toFixed(1)} points.`);
                     }
 
-                    // Red flags
-                    if (breakdown.redFlags < -3) {
-                      parts.push(`Notable red flags detected (${Math.abs(breakdown.redFlags).toFixed(1)} point penalty).`);
+                    // Red flags (with null checks)
+                    if ((breakdown.redFlags ?? 0) < -3) {
+                      parts.push(`Notable red flags detected (${Math.abs(breakdown.redFlags ?? 0).toFixed(1)} point penalty).`);
                     }
 
                     return parts.join(' ');
