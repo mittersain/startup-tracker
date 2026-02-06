@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/stores/auth.store';
-import { authApi } from '@/services/api';
+import { authApi, notificationsApi } from '@/services/api';
 import {
   LayoutDashboard,
   Briefcase,
@@ -11,8 +12,11 @@ import {
   User,
   Menu,
   X,
+  MessageSquare,
+  AtSign,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { format } from 'date-fns';
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -23,8 +27,54 @@ const navigation = [
 export default function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { user, tokens, logout } = useAuthStore();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
+
+  // Fetch unread notification count
+  const { data: unreadData } = useQuery({
+    queryKey: ['notifications-unread-count'],
+    queryFn: () => notificationsApi.getUnreadCount(),
+    refetchInterval: 30000, // Poll every 30 seconds
+  });
+
+  // Fetch notifications list
+  const { data: notificationsData } = useQuery({
+    queryKey: ['notifications'],
+    queryFn: () => notificationsApi.list({ limit: 10 }),
+    enabled: isNotificationsOpen,
+  });
+
+  // Mark notification as read
+  const markReadMutation = useMutation({
+    mutationFn: (notificationId: string) => notificationsApi.markAsRead(notificationId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notifications-unread-count'] });
+    },
+  });
+
+  // Mark all as read
+  const markAllReadMutation = useMutation({
+    mutationFn: () => notificationsApi.markAllAsRead(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['notifications-unread-count'] });
+    },
+  });
+
+  // Close notifications dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
+        setIsNotificationsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const handleLogout = async () => {
     try {
@@ -136,11 +186,92 @@ export default function Layout() {
               <span className="ml-2 text-lg font-bold text-gray-900">StartupTracker</span>
             </div>
             <div className="hidden lg:block" />
-            <div className="flex items-center gap-2 sm:gap-4">
-              <button className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 relative min-h-[44px] min-w-[44px] flex items-center justify-center">
+            <div className="flex items-center gap-2 sm:gap-4 relative" ref={notificationRef}>
+              <button
+                onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 relative min-h-[44px] min-w-[44px] flex items-center justify-center"
+              >
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-2 right-2 w-2 h-2 bg-danger-500 rounded-full" />
+                {(unreadData?.count ?? 0) > 0 && (
+                  <span className="absolute top-1.5 right-1.5 min-w-[18px] h-[18px] bg-danger-500 rounded-full text-white text-xs font-medium flex items-center justify-center px-1">
+                    {unreadData.count > 9 ? '9+' : unreadData.count}
+                  </span>
+                )}
               </button>
+
+              {/* Notifications Dropdown */}
+              {isNotificationsOpen && (
+                <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 bg-white rounded-xl shadow-lg border border-gray-200 z-50 overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                    <h3 className="font-semibold text-gray-900">Notifications</h3>
+                    {(unreadData?.count ?? 0) > 0 && (
+                      <button
+                        onClick={() => markAllReadMutation.mutate()}
+                        className="text-xs text-primary-600 hover:text-primary-700 font-medium"
+                      >
+                        Mark all read
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-96 overflow-y-auto">
+                    {(notificationsData?.notifications?.length ?? 0) > 0 ? (
+                      notificationsData?.notifications.map((notif: {
+                        id: string;
+                        type: string;
+                        message: string;
+                        startupId?: string;
+                        startupName?: string;
+                        isRead: boolean;
+                        createdAt: string;
+                      }) => (
+                        <div
+                          key={notif.id}
+                          className={clsx(
+                            'px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors',
+                            !notif.isRead && 'bg-primary-50'
+                          )}
+                          onClick={() => {
+                            if (!notif.isRead) {
+                              markReadMutation.mutate(notif.id);
+                            }
+                            if (notif.startupId) {
+                              navigate(`/startups/${notif.startupId}`);
+                              setIsNotificationsOpen(false);
+                            }
+                          }}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className={clsx(
+                              'w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0',
+                              notif.type === 'mention' ? 'bg-primary-100' : 'bg-gray-100'
+                            )}>
+                              {notif.type === 'mention' ? (
+                                <AtSign className="w-4 h-4 text-primary-600" />
+                              ) : (
+                                <MessageSquare className="w-4 h-4 text-gray-600" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-gray-900">{notif.message}</p>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                {format(new Date(notif.createdAt), 'MMM d, h:mm a')}
+                              </p>
+                            </div>
+                            {!notif.isRead && (
+                              <div className="w-2 h-2 bg-primary-500 rounded-full flex-shrink-0 mt-2" />
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-4 py-8 text-center text-gray-500">
+                        <Bell className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                        <p className="text-sm">No notifications yet</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </header>

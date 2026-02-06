@@ -7,6 +7,7 @@ import DashboardPage from '@/pages/DashboardPage';
 import StartupsPage from '@/pages/StartupsPage';
 import StartupDetailPage from '@/pages/StartupDetailPage';
 import SettingsPage from '@/pages/SettingsPage';
+import InvitePage from '@/pages/InvitePage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -48,6 +49,9 @@ export default function App() {
           </PublicRoute>
         }
       />
+
+      {/* Public invite page (no auth required) */}
+      <Route path="/invite/:token" element={<InvitePage />} />
 
       {/* Protected routes */}
       <Route
