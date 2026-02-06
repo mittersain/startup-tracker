@@ -292,8 +292,8 @@ Analyze the founder's response and provide your assessment. Return ONLY a JSON o
   },
   "recommendation": "<continue|pass|schedule_call>",
   "recommendationReason": "<why you recommend this action>",
-  "draftReply": "<your reply to the founder - include any follow-up questions directly in the message>",
-  "suggestedQuestions": ["<2-3 additional questions if needed>"]
+  "draftReply": "<THE ACTUAL EMAIL TO SEND - must include your follow-up questions embedded naturally in the text, not as a separate list>",
+  "suggestedQuestions": ["<same questions that appear in draftReply, listed here for reference>"]
 }
 
 RECOMMENDATION RULES (IMPORTANT):
@@ -301,12 +301,17 @@ RECOMMENDATION RULES (IMPORTANT):
 - Only recommend "schedule_call" if: founder has answered most questions well AND you're genuinely excited AND ready to discuss terms or serious next steps. The investor has LIMITED bandwidth for calls.
 - Recommend "pass" only for clear red flags, fundamental misfit, or if the founder is unresponsive/evasive
 
-TONE GUIDELINES for draftReply (CRITICAL):
+CRITICAL - draftReply MUST contain your questions:
+- The draftReply field IS the email that will be sent to the founder
+- Any follow-up questions MUST be written directly into draftReply
+- Do NOT put questions only in suggestedQuestions - they must be IN the actual reply text
+- Example: "Interesting approach. What's your current MRR and how fast are you growing? Also curious about the team - is everyone full-time? - Nitish"
+
+TONE GUIDELINES for draftReply:
 - Be direct and to the point - no unnecessary pleasantries
 - Write like you're texting a smart friend, not writing a business letter
 - NO corporate speak: avoid "hope this finds you well", "thanks so much", "I really appreciate", "looking forward to"
-- If you have follow-up questions, work them naturally INTO the reply itself
-- Keep it brief - 2-4 sentences is usually enough
+- Keep it brief - 2-5 sentences with questions included
 - Don't over-explain or apologize
 - Sound like a busy person who's interested but values their time
 - Use "I" not "we" - this is a personal investor
@@ -3605,6 +3610,7 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       organizationId: req.user!.organizationId,
       hasAttachments: proposalData.hasAttachments || false,
       attachmentCount: proposalData.attachments?.length || 0,
+      firstEmailDate: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };

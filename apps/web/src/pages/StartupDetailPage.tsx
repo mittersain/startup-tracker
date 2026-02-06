@@ -618,6 +618,18 @@ export default function StartupDetailPage() {
                 {startup.scoreTrendDelta.toFixed(1)} points in the last 30 days
               </p>
             )}
+            {(startup.firstEmailDate || startup.createdAt) && (
+              <div className="flex items-center gap-2 mt-2 text-sm text-gray-500">
+                <Clock className="w-4 h-4" />
+                <span>
+                  {(() => {
+                    const startDate = new Date(startup.firstEmailDate || startup.createdAt);
+                    const days = Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+                    return `${days} ${days === 1 ? 'day' : 'days'} in pipeline`;
+                  })()}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Score breakdown bars */}
