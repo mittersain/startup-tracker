@@ -5409,38 +5409,18 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Get the email record for this startup
+    // Get ALL inbound email records for this startup (not just the first one)
     const emailsSnapshot = await db.collection('emails')
       .where('startupId', '==', id)
       .where('direction', '==', 'inbound')
       .orderBy('date', 'asc')
-      .limit(1)
       .get();
 
     if (emailsSnapshot.empty) {
-      return res.status(404).json({ error: 'No inbound email found for this startup' });
+      return res.status(404).json({ error: 'No inbound emails found for this startup' });
     }
 
-    const emailDoc = emailsSnapshot.docs[0];
-    const emailData = emailDoc.data();
-    // Only use messageId if it looks like a real IMAP Message-ID (contains @ or angle brackets)
-    const rawMessageId = emailData.messageId;
-    const isRealMessageId = rawMessageId && (rawMessageId.includes('@') || rawMessageId.includes('<'));
-    const messageId = isRealMessageId ? rawMessageId : null;
-
-    // Handle Firestore Timestamp for date
-    let emailDate: Date;
-    if (emailData.date && typeof emailData.date.toDate === 'function') {
-      emailDate = emailData.date.toDate();
-    } else if (emailData.date instanceof Date) {
-      emailDate = emailData.date;
-    } else if (typeof emailData.date === 'string') {
-      emailDate = new Date(emailData.date);
-    } else {
-      emailDate = new Date(); // fallback
-    }
-
-    console.log(`[RescanAttachments] Found email record: subject="${emailData.subject}", messageId="${rawMessageId || 'NONE'}" (real=${isRealMessageId}), date="${emailDate.toISOString()}", from="${emailData.from}"`);
+    console.log(`[RescanAttachments] Found ${emailsSnapshot.docs.length} inbound email(s) for startup ${id}`);
 
     // Get IMAP config using the shared helper function
     console.log(`[RescanAttachments] Getting IMAP config for org: ${req.user!.organizationId}`);
@@ -5451,7 +5431,7 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
     }
     console.log(`[RescanAttachments] Connecting to IMAP: ${config.host}:${config.port}, folder: ${config.folder}`);
 
-    // Connect to IMAP and search for the email
+    // Connect to IMAP once for all emails
     const client = new ImapFlow({
       host: config.host,
       port: config.port,
@@ -5468,6 +5448,7 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
     });
 
     let attachmentsFound = 0;
+    let emailsScanned = 0;
     const attachmentData: Array<{
       fileName: string;
       mimeType: string;
@@ -5483,158 +5464,185 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
       await client.mailboxOpen(config.folder);
       console.log(`[RescanAttachments] Mailbox opened`);
 
-      let uidsToCheck: number[] = [];
+      // Process each inbound email
+      for (const emailDoc of emailsSnapshot.docs) {
+        const emailData = emailDoc.data();
 
-      // First try to search by message-id if available
-      if (messageId) {
-        console.log(`[RescanAttachments] Searching for email with messageId: ${messageId}`);
-        const searchResult = await client.search({ header: { 'Message-ID': messageId } });
-        uidsToCheck = Array.isArray(searchResult) ? searchResult : [];
-      }
+        // Only use messageId if it looks like a real IMAP Message-ID (contains @ or angle brackets)
+        const rawMessageId = emailData.messageId;
+        const isRealMessageId = rawMessageId && (rawMessageId.includes('@') || rawMessageId.includes('<'));
+        const messageId = isRealMessageId ? rawMessageId : null;
 
-      // If no results or no messageId, try broader search by subject and date
-      if (uidsToCheck.length === 0) {
-        const sinceDate = new Date(emailDate);
-        sinceDate.setDate(sinceDate.getDate() - 7); // Search wider date range (7 days before)
-
-        // Try searching by subject first - use shorter substring and remove special chars
-        const subjectStr = typeof emailData.subject === 'string'
-          ? emailData.subject.substring(0, 30).replace(/[|&@#$%^*(){}[\]]/g, ' ').trim()
-          : '';
-
-        if (subjectStr.length > 5) {
-          console.log(`[RescanAttachments] Searching by subject: "${subjectStr}" since ${sinceDate.toISOString()}`);
-          const searchBySubject = await client.search({
-            since: sinceDate,
-            subject: subjectStr
-          });
-          uidsToCheck = Array.isArray(searchBySubject) ? searchBySubject : [];
-          console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails matching subject`);
+        // Handle Firestore Timestamp for date
+        let emailDate: Date;
+        if (emailData.date && typeof emailData.date.toDate === 'function') {
+          emailDate = emailData.date.toDate();
+        } else if (emailData.date instanceof Date) {
+          emailDate = emailData.date;
+        } else if (typeof emailData.date === 'string') {
+          emailDate = new Date(emailData.date);
+        } else {
+          emailDate = new Date(); // fallback
         }
 
-        // If still no results, try searching by sender email
-        if (uidsToCheck.length === 0 && emailData.from) {
-          console.log(`[RescanAttachments] Searching by sender: "${emailData.from}" since ${sinceDate.toISOString()}`);
-          const searchByFrom = await client.search({
-            since: sinceDate,
-            from: emailData.from
-          });
-          uidsToCheck = Array.isArray(searchByFrom) ? searchByFrom : [];
-          console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails from sender`);
+        console.log(`[RescanAttachments] Processing email ${emailsScanned + 1}/${emailsSnapshot.docs.length}: subject="${emailData.subject}", messageId="${rawMessageId || 'NONE'}" (real=${isRealMessageId}), date="${emailDate.toISOString()}", from="${emailData.from}"`);
 
-          // If multiple results, try to match by subject similarity
-          if (uidsToCheck.length > 1 && subjectStr) {
-            console.log(`[RescanAttachments] Multiple emails found, will check ${Math.min(uidsToCheck.length, 5)} for subject match`);
-            // Check first few emails to find best match
-            for (const checkUid of uidsToCheck.slice(0, 5)) {
-              const checkMsg = await client.fetchOne(checkUid, { envelope: true });
-              if (checkMsg && typeof checkMsg === 'object' && 'envelope' in checkMsg) {
-                const envelope = checkMsg.envelope as { subject?: string };
-                if (envelope.subject && envelope.subject.toLowerCase().includes(subjectStr.toLowerCase().substring(0, 15))) {
-                  console.log(`[RescanAttachments] Found matching email: "${envelope.subject}"`);
-                  uidsToCheck = [checkUid];
-                  break;
-                }
-              }
-            }
-          }
+        let uidsToCheck: number[] = [];
+
+        // First try to search by message-id if available
+        if (messageId) {
+          console.log(`[RescanAttachments] Searching for email with messageId: ${messageId}`);
+          const searchResult = await client.search({ header: { 'Message-ID': messageId } });
+          uidsToCheck = Array.isArray(searchResult) ? searchResult : [];
         }
 
+        // If no results or no messageId, try broader search by subject and date
         if (uidsToCheck.length === 0) {
-          await client.logout();
-          return res.status(404).json({ error: 'Could not find original email in inbox. The email may have been deleted or moved.' });
-        }
-      }
+          const sinceDate = new Date(emailDate);
+          sinceDate.setDate(sinceDate.getDate() - 7); // Search wider date range (7 days before)
 
-      const uid = uidsToCheck[0];
-      const message = await client.fetchOne(uid, { source: true });
+          // Try searching by subject first - use shorter substring and remove special chars
+          const subjectStr = typeof emailData.subject === 'string'
+            ? emailData.subject.substring(0, 30).replace(/[|&@#$%^*(){}[\]]/g, ' ').trim()
+            : '';
 
-      if (message && typeof message === 'object' && 'source' in message && message.source) {
-        const parsed: ParsedMail = await simpleParser(message.source as Buffer);
+          if (subjectStr.length > 5) {
+            console.log(`[RescanAttachments] Searching by subject: "${subjectStr}" since ${sinceDate.toISOString()}`);
+            const searchBySubject = await client.search({
+              since: sinceDate,
+              subject: subjectStr
+            });
+            uidsToCheck = Array.isArray(searchBySubject) ? searchBySubject : [];
+            console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails matching subject`);
+          }
 
-        console.log(`[RescanAttachments] Found email: ${parsed.subject}`);
-        console.log(`[RescanAttachments] Attachments: ${parsed.attachments?.length || 0}`);
+          // If still no results, try searching by sender email
+          if (uidsToCheck.length === 0 && emailData.from) {
+            console.log(`[RescanAttachments] Searching by sender: "${emailData.from}" since ${sinceDate.toISOString()}`);
+            const searchByFrom = await client.search({
+              since: sinceDate,
+              from: emailData.from
+            });
+            uidsToCheck = Array.isArray(searchByFrom) ? searchByFrom : [];
+            console.log(`[RescanAttachments] Found ${uidsToCheck.length} emails from sender`);
 
-        if (parsed.attachments && parsed.attachments.length > 0) {
-          for (const attachment of parsed.attachments) {
-            const relevantMimeTypes = [
-              'application/pdf',
-              'application/vnd.ms-powerpoint',
-              'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-              'application/msword',
-              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            ];
-
-            const fileName = attachment.filename || 'attachment';
-            const isPDF = fileName.toLowerCase().endsWith('.pdf');
-            const isPPT = fileName.toLowerCase().endsWith('.ppt') || fileName.toLowerCase().endsWith('.pptx');
-            const isDOC = fileName.toLowerCase().endsWith('.doc') || fileName.toLowerCase().endsWith('.docx');
-
-            if (relevantMimeTypes.includes(attachment.contentType) || isPDF || isPPT || isDOC) {
-              try {
-                // Check if deck already exists for this file
-                const existingDeck = await db.collection('decks')
-                  .where('startupId', '==', id)
-                  .where('fileName', '==', fileName)
-                  .get();
-
-                if (!existingDeck.empty) {
-                  console.log(`[RescanAttachments] Deck already exists for ${fileName}, skipping`);
-                  continue;
+            // If multiple results, try to match by subject similarity
+            if (uidsToCheck.length > 1 && subjectStr) {
+              console.log(`[RescanAttachments] Multiple emails found, will check ${Math.min(uidsToCheck.length, 5)} for subject match`);
+              // Check first few emails to find best match
+              for (const checkUid of uidsToCheck.slice(0, 5)) {
+                const checkMsg = await client.fetchOne(checkUid, { envelope: true });
+                if (checkMsg && typeof checkMsg === 'object' && 'envelope' in checkMsg) {
+                  const envelope = checkMsg.envelope as { subject?: string };
+                  if (envelope.subject && envelope.subject.toLowerCase().includes(subjectStr.toLowerCase().substring(0, 15))) {
+                    console.log(`[RescanAttachments] Found matching email: "${envelope.subject}"`);
+                    uidsToCheck = [checkUid];
+                    break;
+                  }
                 }
+              }
+            }
+          }
 
-                // Store attachment in Firebase Storage
-                const bucket = admin.storage().bucket();
-                const storagePath = `attachments/${req.user!.organizationId}/${id}/${Date.now()}-${fileName}`;
-                const file = bucket.file(storagePath);
+          if (uidsToCheck.length === 0) {
+            console.log(`[RescanAttachments] Could not find email in inbox, skipping: ${emailData.subject}`);
+            emailsScanned++;
+            continue; // Skip this email but continue with others
+          }
+        }
 
-                await file.save(attachment.content, {
-                  metadata: {
-                    contentType: attachment.contentType,
+        const uid = uidsToCheck[0];
+        const message = await client.fetchOne(uid, { source: true });
+
+        if (message && typeof message === 'object' && 'source' in message && message.source) {
+          const parsed: ParsedMail = await simpleParser(message.source as Buffer);
+
+          console.log(`[RescanAttachments] Found email: ${parsed.subject}`);
+          console.log(`[RescanAttachments] Attachments: ${parsed.attachments?.length || 0}`);
+
+          if (parsed.attachments && parsed.attachments.length > 0) {
+            for (const attachment of parsed.attachments) {
+              const relevantMimeTypes = [
+                'application/pdf',
+                'application/vnd.ms-powerpoint',
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                'application/msword',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              ];
+
+              const fileName = attachment.filename || 'attachment';
+              const isPDF = fileName.toLowerCase().endsWith('.pdf');
+              const isPPT = fileName.toLowerCase().endsWith('.ppt') || fileName.toLowerCase().endsWith('.pptx');
+              const isDOC = fileName.toLowerCase().endsWith('.doc') || fileName.toLowerCase().endsWith('.docx');
+
+              if (relevantMimeTypes.includes(attachment.contentType) || isPDF || isPPT || isDOC) {
+                try {
+                  // Check if deck already exists for this file
+                  const existingDeck = await db.collection('decks')
+                    .where('startupId', '==', id)
+                    .where('fileName', '==', fileName)
+                    .get();
+
+                  if (!existingDeck.empty) {
+                    console.log(`[RescanAttachments] Deck already exists for ${fileName}, skipping`);
+                    continue;
+                  }
+
+                  // Store attachment in Firebase Storage
+                  const bucket = admin.storage().bucket();
+                  const storagePath = `attachments/${req.user!.organizationId}/${id}/${Date.now()}-${fileName}`;
+                  const file = bucket.file(storagePath);
+
+                  await file.save(attachment.content, {
                     metadata: {
-                      originalName: fileName,
-                      startupId: id,
+                      contentType: attachment.contentType,
+                      metadata: {
+                        originalName: fileName,
+                        startupId: id,
+                      },
                     },
-                  },
-                  public: true, // Make file publicly readable
-                });
+                    public: true, // Make file publicly readable
+                  });
 
-                // Use the public URL format for Firebase Storage
-                const bucketName = bucket.name;
-                const fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media`;
-                console.log(`[RescanAttachments] Stored file with public URL: ${fileName}`);
+                  // Use the public URL format for Firebase Storage
+                  const bucketName = bucket.name;
+                  const fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media`;
+                  console.log(`[RescanAttachments] Stored file with public URL: ${fileName}`);
 
-                // Create deck record
-                const deckRef = db.collection('decks').doc();
-                await deckRef.set({
-                  startupId: id,
-                  organizationId: req.user!.organizationId,
-                  fileName,
-                  fileSize: attachment.size || attachment.content.length,
-                  fileUrl,
-                  storagePath,
-                  mimeType: attachment.contentType,
-                  source: 'email_rescan',
-                  status: 'uploaded',
-                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                });
+                  // Create deck record
+                  const deckRef = db.collection('decks').doc();
+                  await deckRef.set({
+                    startupId: id,
+                    organizationId: req.user!.organizationId,
+                    fileName,
+                    fileSize: attachment.size || attachment.content.length,
+                    fileUrl,
+                    storagePath,
+                    mimeType: attachment.contentType,
+                    source: 'email_rescan',
+                    status: 'uploaded',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  });
 
-                attachmentData.push({
-                  fileName,
-                  mimeType: attachment.contentType,
-                  size: attachment.size || attachment.content.length,
-                  storagePath,
-                  storageUrl: fileUrl,
-                });
+                  attachmentData.push({
+                    fileName,
+                    mimeType: attachment.contentType,
+                    size: attachment.size || attachment.content.length,
+                    storagePath,
+                    storageUrl: fileUrl,
+                  });
 
-                attachmentsFound++;
-                console.log(`[RescanAttachments] Stored attachment: ${fileName}`);
-              } catch (attachmentError) {
-                console.error(`[RescanAttachments] Failed to store attachment ${fileName}:`, attachmentError);
+                  attachmentsFound++;
+                  console.log(`[RescanAttachments] Stored attachment: ${fileName}`);
+                } catch (attachmentError) {
+                  console.error(`[RescanAttachments] Failed to store attachment ${fileName}:`, attachmentError);
+                }
               }
             }
           }
         }
+
+        emailsScanned++;
       }
 
       await client.logout();
@@ -5655,10 +5663,11 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
     return res.json({
       success: true,
       attachmentsFound,
+      emailsScanned,
       attachments: attachmentData,
       message: attachmentsFound > 0
-        ? `Found and stored ${attachmentsFound} attachment(s)`
-        : 'No new attachments found in the original email'
+        ? `Found and stored ${attachmentsFound} attachment(s) from ${emailsScanned} email(s)`
+        : `No new attachments found in ${emailsScanned} email(s)`
     });
   } catch (error) {
     console.error('[RescanAttachments] Error:', error);

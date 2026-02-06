@@ -333,9 +333,9 @@ export default function StartupDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['startup', id] });
       queryClient.invalidateQueries({ queryKey: ['startup-decks', id] });
       if (data.attachmentsFound > 0) {
-        toast.success(`Found ${data.attachmentsFound} attachment(s) from original email!`);
+        toast.success(`Found ${data.attachmentsFound} attachment(s) from ${data.emailsScanned || 1} email(s)!`);
       } else {
-        toast(data.message || 'No new attachments found in the original email');
+        toast(data.message || `No new attachments found in ${data.emailsScanned || 1} email(s)`);
       }
     },
     onError: (error: Error) => {
@@ -2241,8 +2241,8 @@ export default function StartupDetailPage() {
               <div className="flex items-center gap-3">
                 <Mail className="w-5 h-5 text-gray-400" />
                 <div>
-                  <p className="text-sm font-medium text-gray-700">Missing attachments from original email?</p>
-                  <p className="text-xs text-gray-500">Re-fetch attachments from the original proposal email</p>
+                  <p className="text-sm font-medium text-gray-700">Missing attachments from emails?</p>
+                  <p className="text-xs text-gray-500">Re-fetch attachments from all inbound emails</p>
                 </div>
               </div>
               <button
