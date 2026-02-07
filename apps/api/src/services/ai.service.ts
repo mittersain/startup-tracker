@@ -301,7 +301,7 @@ ${deck.questions?.map((q, i) => `${i + 1}. ${q}`).join('\n') || 'None'}
 2. References specific details from their email/pitch deck to show you've reviewed their materials
 3. Shows genuine interest in their startup
 4. Asks 3-4 focused questions that will help evaluate the opportunity (prioritize questions about gaps in the pitch deck or concerns identified)
-5. Keeps it concise and easy for the founder to respond to
+5. IMPORTANT: Format the questions as a numbered list and explicitly ask the founder to answer them directly in their email reply
 6. If there's conversation history, acknowledge previous exchanges and build on them
 
 STARTUP INFO:
@@ -329,6 +329,13 @@ IMPORTANT INSTRUCTIONS:
 - If there are gaps in the pitch deck (missing traction, unclear business model, etc.), ask about those specifically
 - Avoid generic questions - make them specific to this startup
 - If this is a follow-up (previous conversation exists), don't repeat questions already asked
+- REQUIRED FORMAT: After a brief intro paragraph, include this exact phrase followed by numbered questions:
+  "I've received the attachment. To streamline things, could you please answer the following questions directly in your email response? This will make it easier for me to review.
+
+  1. [First question]
+  2. [Second question]
+  3. [Third question]"
+- This format makes it easy for founders to reply inline with their answers
 
 Write the email body only (no subject line). Start with "Hi ${founderFirstName}," and end with exactly this signature (no variations):
 
@@ -336,7 +343,7 @@ Best regards,
 Agent Jarvis
 (on behalf of Nitish Mittersain)
 
-Keep it under 200 words. Be warm but professional. Focus on questions that are easy for a founder to answer quickly.`;
+Keep it under 250 words. Be warm but professional. Focus on questions that are easy for a founder to answer quickly.`;
 
     const text = await this.callGemini(prompt);
     // Ensure the signature is correct and consistent
