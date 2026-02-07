@@ -155,7 +155,14 @@ Provide your analysis as a JSON object with this exact structure:
   "draftReply": string (a professional, personalized email reply to the founder acknowledging their pitch, asking 2-3 clarifying questions, and expressing interest in learning more. Sign as "Nitish" and keep it warm but professional.)
 }
 
-Be realistic in your scoring. Early-stage startups with limited info should score 40-60. Only exceptional startups with strong traction score above 70.
+CRITICAL SCORING RULES:
+- Be CONSERVATIVE. Most early-stage startups should score 30-50 overall.
+- Scores MUST NOT exceed their maximum: team (0-25), market (0-25), product (0-20), traction (0-20), deal (0-10).
+- Without concrete traction data (revenue, users, growth metrics), traction score should be 5-10 max.
+- Without detailed team backgrounds, team score should be 10-15 max.
+- Only startups with proven metrics and strong evidence score above 60 overall.
+- Be skeptical. Assume claims are optimistic unless backed by data.
+
 Respond with ONLY the JSON object, no markdown or explanation.`;
 
     const result = await model.generateContent(prompt);
@@ -170,6 +177,26 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
+
+    // Validate and clamp scores to their maximum values
+    if (parsed.scoreBreakdown) {
+      const maxScores = { team: 25, market: 25, product: 20, traction: 20, deal: 10 };
+      for (const [category, max] of Object.entries(maxScores)) {
+        if (parsed.scoreBreakdown[category]?.base !== undefined) {
+          parsed.scoreBreakdown[category].base = Math.min(Math.max(0, parsed.scoreBreakdown[category].base), max);
+        }
+      }
+      // Recalculate overall score from clamped values
+      const breakdown = parsed.scoreBreakdown;
+      const recalculatedScore =
+        (breakdown.team?.base || 0) +
+        (breakdown.market?.base || 0) +
+        (breakdown.product?.base || 0) +
+        (breakdown.traction?.base || 0) +
+        (breakdown.deal?.base || 0);
+      parsed.currentScore = Math.min(100, Math.max(0, recalculatedScore));
+    }
+
     console.log(`[AI Analyze] Generated score ${parsed.currentScore} for ${startup.name}`);
     return parsed;
   } catch (error) {
