@@ -2176,6 +2176,330 @@ Return ONLY the email text, no JSON or markdown.`;
 
 // ==================== ANALYSIS TIMELINE ROUTES ====================
 
+// AI Helper to analyze an email and extract insights
+async function analyzeEmailForInsights(email: {
+  subject: string;
+  body: string;
+  from: string;
+  direction: string;
+}, startupContext: {
+  name: string;
+  description?: string;
+  existingInsights?: string[];
+}): Promise<{
+  newInsights: string[];
+  concerns: string[];
+  questions: string[];
+  answeredQuestions: string[];
+  confidence: number;
+} | null> {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `Analyze this email communication related to a startup and extract key insights.
+
+STARTUP: ${startupContext.name}
+${startupContext.description ? `Description: ${startupContext.description}` : ''}
+
+EMAIL:
+Direction: ${email.direction}
+From: ${email.from}
+Subject: ${email.subject}
+Body: ${email.body?.substring(0, 4000) || 'No body'}
+
+${startupContext.existingInsights?.length ? `EXISTING INSIGHTS ALREADY KNOWN:
+${startupContext.existingInsights.join('\n')}` : ''}
+
+Extract NEW information from this email. Respond with ONLY a JSON object:
+{
+  "newInsights": string[] (new facts learned from this email that weren't known before),
+  "concerns": string[] (any red flags or concerns raised),
+  "questions": string[] (new questions we should ask based on this email),
+  "answeredQuestions": string[] (questions that this email answers or addresses),
+  "confidence": number (0-100, how much this email adds to our understanding)
+}`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    console.error('[Email Analysis] Error:', error);
+    return null;
+  }
+}
+
+// Re-analyze endpoint - reconciles all content and ensures nothing is missed
+app.post('/startups/:id/re-analyze', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+
+    // Verify startup exists and belongs to user's org
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists || startupDoc.data()?.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    console.log(`[Re-analyze] Starting reconciliation for ${startupData.name}`);
+
+    // Get all existing analysis events
+    const existingEventsSnapshot = await db.collection('analysisEvents')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const analyzedSources = new Set<string>();
+    existingEventsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.sourceType && data.sourceId) {
+        analyzedSources.add(`${data.sourceType}:${data.sourceId}`);
+      }
+      // Also track by sourceName for initial proposals
+      if (data.sourceType === 'initial') {
+        analyzedSources.add('initial:proposal');
+      }
+    });
+
+    console.log(`[Re-analyze] Found ${analyzedSources.size} already analyzed sources`);
+
+    // Get all emails for this startup
+    const emailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    // Get all decks for this startup
+    const decksSnapshot = await db.collection('decks')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const results = {
+      emailsAnalyzed: 0,
+      emailsSkipped: 0,
+      decksAnalyzed: 0,
+      decksSkipped: 0,
+      newInsights: [] as string[],
+      concerns: [] as string[],
+      questions: [] as string[],
+    };
+
+    // Build cumulative analysis from existing events
+    let cumulativeAnalysis: Record<string, unknown> = {
+      problem: undefined,
+      solution: startupData.description || undefined,
+      founders: startupData.founderName ? [{ name: startupData.founderName, role: 'Founder' }] : undefined,
+      askAmount: undefined,
+      strengths: [] as string[],
+      weaknesses: [] as string[],
+      unansweredQuestions: [] as string[],
+      answeredQuestions: [] as string[],
+      confidenceLevel: 20,
+    };
+
+    // Get existing cumulative if available
+    if (existingEventsSnapshot.docs.length > 0) {
+      const sortedEvents = existingEventsSnapshot.docs
+        .map(d => ({ createdAt: d.data().createdAt?.toDate?.() || new Date(0), data: d.data() }))
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+      if (sortedEvents[0]?.data?.cumulativeAnalysis) {
+        cumulativeAnalysis = sortedEvents[0].data.cumulativeAnalysis as Record<string, unknown>;
+      }
+    }
+
+    const existingInsights = [
+      ...((cumulativeAnalysis.strengths as string[]) || []),
+      ...((cumulativeAnalysis.weaknesses as string[]) || []),
+    ];
+
+    // Analyze unprocessed emails
+    for (const emailDoc of emailsSnapshot.docs) {
+      const emailData = emailDoc.data();
+      const sourceKey = `email:${emailDoc.id}`;
+
+      if (analyzedSources.has(sourceKey)) {
+        results.emailsSkipped++;
+        continue;
+      }
+
+      console.log(`[Re-analyze] Analyzing email: ${emailData.subject}`);
+
+      const emailAnalysis = await analyzeEmailForInsights({
+        subject: emailData.subject || 'No subject',
+        body: emailData.body || emailData.bodyPreview || '',
+        from: emailData.from || 'unknown',
+        direction: emailData.direction || 'inbound',
+      }, {
+        name: startupData.name,
+        description: startupData.description,
+        existingInsights,
+      });
+
+      if (emailAnalysis) {
+        // Merge into cumulative analysis
+        const strengths = (cumulativeAnalysis.strengths as string[]) || [];
+        const weaknesses = (cumulativeAnalysis.weaknesses as string[]) || [];
+        const unanswered = (cumulativeAnalysis.unansweredQuestions as string[]) || [];
+        const answered = (cumulativeAnalysis.answeredQuestions as string[]) || [];
+
+        for (const insight of emailAnalysis.newInsights || []) {
+          if (!strengths.includes(insight)) {
+            strengths.push(insight);
+            results.newInsights.push(insight);
+          }
+        }
+        for (const concern of emailAnalysis.concerns || []) {
+          if (!weaknesses.includes(concern)) {
+            weaknesses.push(concern);
+            results.concerns.push(concern);
+          }
+        }
+        for (const q of emailAnalysis.questions || []) {
+          if (!unanswered.includes(q) && !answered.includes(q)) {
+            unanswered.push(q);
+            results.questions.push(q);
+          }
+        }
+        for (const aq of emailAnalysis.answeredQuestions || []) {
+          if (!answered.includes(aq)) answered.push(aq);
+          // Remove from unanswered if it was answered
+          const idx = unanswered.indexOf(aq);
+          if (idx > -1) unanswered.splice(idx, 1);
+        }
+
+        cumulativeAnalysis.strengths = strengths;
+        cumulativeAnalysis.weaknesses = weaknesses;
+        cumulativeAnalysis.unansweredQuestions = unanswered;
+        cumulativeAnalysis.answeredQuestions = answered;
+        cumulativeAnalysis.confidenceLevel = Math.min(((cumulativeAnalysis.confidenceLevel as number) || 20) + 10, 90);
+
+        // Create analysis event
+        await db.collection('analysisEvents').add({
+          startupId,
+          sourceType: 'email',
+          sourceId: emailDoc.id,
+          sourceName: emailData.subject || 'Email',
+          inputSummary: `Email from ${emailData.from}: "${emailData.subject}"`,
+          newInsights: emailAnalysis.newInsights,
+          concerns: emailAnalysis.concerns,
+          questions: emailAnalysis.questions,
+          answeredQuestions: emailAnalysis.answeredQuestions,
+          cumulativeAnalysis,
+          overallConfidence: (cumulativeAnalysis.confidenceLevel as number) / 100,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        results.emailsAnalyzed++;
+        existingInsights.push(...(emailAnalysis.newInsights || []));
+      } else {
+        results.emailsSkipped++;
+      }
+    }
+
+    // Analyze unprocessed decks
+    for (const deckDoc of decksSnapshot.docs) {
+      const deckData = deckDoc.data();
+      const sourceKey = `deck:${deckDoc.id}`;
+
+      if (analyzedSources.has(sourceKey)) {
+        results.decksSkipped++;
+        continue;
+      }
+
+      // Check if deck already has AI analysis
+      if (!deckData.aiAnalysis || deckData.aiAnalysis.error) {
+        console.log(`[Re-analyze] Deck ${deckData.fileName} has no analysis, triggering analysis...`);
+
+        // If deck has storage path, we could re-analyze
+        // For now, we'll just create an event from existing data
+        if (deckData.storagePath) {
+          try {
+            const bucket = admin.storage().bucket();
+            const file = bucket.file(deckData.storagePath);
+            const [exists] = await file.exists();
+
+            if (exists) {
+              const [buffer] = await file.download();
+              await analyzeDeckWithAI(deckDoc.id, buffer, deckData.fileName, startupId);
+              results.decksAnalyzed++;
+              continue;
+            }
+          } catch (downloadError) {
+            console.error('[Re-analyze] Failed to download deck:', downloadError);
+          }
+        }
+
+        results.decksSkipped++;
+        continue;
+      }
+
+      console.log(`[Re-analyze] Processing deck analysis: ${deckData.fileName}`);
+
+      const analysis = deckData.aiAnalysis;
+      const strengths = (cumulativeAnalysis.strengths as string[]) || [];
+      const weaknesses = (cumulativeAnalysis.weaknesses as string[]) || [];
+
+      for (const s of analysis.strengths || []) {
+        if (!strengths.includes(s)) {
+          strengths.push(s);
+          results.newInsights.push(s);
+        }
+      }
+      for (const w of analysis.weaknesses || []) {
+        if (!weaknesses.includes(w)) {
+          weaknesses.push(w);
+          results.concerns.push(w);
+        }
+      }
+
+      cumulativeAnalysis.strengths = strengths;
+      cumulativeAnalysis.weaknesses = weaknesses;
+      cumulativeAnalysis.confidenceLevel = Math.min(((cumulativeAnalysis.confidenceLevel as number) || 20) + 15, 90);
+
+      // Create analysis event
+      await db.collection('analysisEvents').add({
+        startupId,
+        sourceType: 'deck',
+        sourceId: deckDoc.id,
+        sourceName: deckData.fileName,
+        inputSummary: `Pitch deck: ${deckData.fileName}`,
+        newInsights: analysis.strengths || [],
+        concerns: analysis.weaknesses || [],
+        cumulativeAnalysis,
+        overallConfidence: (cumulativeAnalysis.confidenceLevel as number) / 100,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      results.decksAnalyzed++;
+    }
+
+    // Update startup with latest cumulative analysis if we analyzed anything
+    if (results.emailsAnalyzed > 0 || results.decksAnalyzed > 0) {
+      await db.collection('startups').doc(startupId).update({
+        cumulativeAnalysis,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    console.log(`[Re-analyze] Complete. Emails: ${results.emailsAnalyzed} analyzed, ${results.emailsSkipped} skipped. Decks: ${results.decksAnalyzed} analyzed, ${results.decksSkipped} skipped.`);
+
+    return res.json({
+      success: true,
+      results,
+      cumulativeAnalysis,
+      message: results.emailsAnalyzed + results.decksAnalyzed > 0
+        ? `Analyzed ${results.emailsAnalyzed} emails and ${results.decksAnalyzed} decks`
+        : 'All content already analyzed - nothing new to process',
+    });
+  } catch (error) {
+    console.error('Re-analyze error:', error);
+    return res.status(500).json({ error: 'Failed to re-analyze startup' });
+  }
+});
+
 // Get analysis timeline for a startup
 app.get('/startups/:id/analysis-timeline', authenticate, async (req: AuthRequest, res) => {
   try {
