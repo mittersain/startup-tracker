@@ -51,6 +51,7 @@ import clsx from 'clsx';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 import type { DealStatus, ScoreBreakdown } from '@startup-tracker/shared';
+import { ScoreTimelineChart } from '@/components/ScoreTimelineChart';
 
 interface BusinessModelAnalysis {
   sector: string;
@@ -146,6 +147,12 @@ export default function StartupDetailPage() {
   const { data: scoreEvents } = useQuery({
     queryKey: ['startup-events', id],
     queryFn: () => startupsApi.getScoreEvents(id!, { limit: 20 }),
+    enabled: !!id,
+  });
+
+  const { data: scoreHistory } = useQuery({
+    queryKey: ['startup-score-history', id],
+    queryFn: () => startupsApi.getScoreHistory(id!, 90),
     enabled: !!id,
   });
 
@@ -3130,8 +3137,14 @@ export default function StartupDetailPage() {
       )}
 
       {activeTab === 'events' && (
-        <div className="card">
-          {(scoreEvents?.data?.length ?? 0) > 0 ? (
+        <>
+          {/* Score Timeline Chart */}
+          <ScoreTimelineChart data={scoreHistory || []} />
+
+          {/* Score Events List */}
+          <div className="card">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Score Events</h3>
+            {(scoreEvents?.data?.length ?? 0) > 0 ? (
             <div className="divide-y divide-gray-200">
               {scoreEvents?.data.map((event: {
                 id: string;
@@ -3206,7 +3219,8 @@ export default function StartupDetailPage() {
               </button>
             </div>
           )}
-        </div>
+          </div>
+        </>
       )}
 
       {/* Document Analysis Progress Modal */}
