@@ -7,28 +7,29 @@ An AI-powered platform for tracking startup investments, analyzing pitch decks, 
 - **Pitch Deck Analysis**: Upload PDFs and get AI-powered extraction and scoring
 - **Dynamic Investibility Scoring**: Score updates based on all communications and signals
 - **Email Integration**: Connect Gmail (via IMAP) to automatically track startup communications
+- **Analysis Timeline**: Track evolving understanding of startups over time
 - **Multi-user Support**: Role-based access control (Admin, Partner, Analyst, Viewer)
 - **Communication Analytics**: Track response times, consistency, and red flags
 
 ## Tech Stack
 
 - **Frontend**: React 19, TypeScript, Vite, TailwindCSS, React Query
-- **Backend**: Node.js, Express, TypeScript, Prisma ORM
-- **Database**: PostgreSQL
+- **Backend**: Firebase Cloud Functions, Express, TypeScript
+- **Database**: Firestore (NoSQL)
 - **AI**: Google Gemini API
-- **Storage**: S3-compatible (MinIO for local dev)
+- **Authentication**: Firebase Auth
+- **Hosting**: Firebase Hosting
 
 ## Project Structure
 
 ```
 startup-tracker/
 ├── apps/
-│   ├── api/          # Express backend
 │   └── web/          # React frontend
+├── functions/        # Firebase Cloud Functions (Express API)
 ├── packages/
 │   ├── shared/       # Shared types & utilities
 │   └── ai-prompts/   # AI prompt templates
-├── docker-compose.yml
 └── turbo.json
 ```
 
@@ -36,7 +37,7 @@ startup-tracker/
 
 - Node.js 20+
 - npm 10+
-- Docker & Docker Compose (for local database)
+- Firebase CLI (`npm install -g firebase-tools`)
 - Google Gemini API key
 
 ## Getting Started
@@ -46,54 +47,44 @@ startup-tracker/
 ```bash
 cd startup-tracker
 npm install
+cd functions && npm install
 ```
 
-### 2. Start Infrastructure
+### 2. Configure Firebase
 
 ```bash
-docker compose up -d
-```
+# Login to Firebase
+firebase login
 
-This starts:
-- PostgreSQL on port 5432
-- MinIO (S3) on ports 9000/9001
+# Initialize project (if not already done)
+firebase init
+```
 
 ### 3. Configure Environment
 
-```bash
-# Copy example env file
-cp apps/api/.env.example apps/api/.env
+Create `functions/.env` with:
 
-# Edit with your values
-# Required: GEMINI_API_KEY, JWT_SECRET
+```bash
+GEMINI_API_KEY="your-gemini-api-key"
 ```
 
-### 4. Set Up Database
+### 4. Start Development
 
 ```bash
-# Generate Prisma client
-npm run db:generate
+# Start Firebase emulators
+cd functions && npm run serve
 
-# Run migrations
-npm run db:migrate
-```
-
-### 5. Start Development
-
-```bash
-npm run dev
+# In another terminal, start frontend
+npm run dev --workspace=@startup-tracker/web
 ```
 
 - Frontend: http://localhost:5173
-- Backend: http://localhost:3001
+- Backend: http://localhost:5001
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET` | Secret for JWT signing |
-| `ANTHROPIC_API_KEY` | Claude API key |
 | `GEMINI_API_KEY` | Google Gemini API key (for AI analysis) |
 
 ## API Endpoints
@@ -101,7 +92,6 @@ npm run dev
 ### Authentication
 - `POST /api/auth/register` - Register new user/org
 - `POST /api/auth/login` - Login
-- `POST /api/auth/refresh` - Refresh tokens
 - `GET /api/auth/me` - Get current user
 
 ### Startups
@@ -109,18 +99,22 @@ npm run dev
 - `POST /api/startups` - Create startup
 - `GET /api/startups/:id` - Get startup details
 - `PATCH /api/startups/:id` - Update startup
-- `GET /api/startups/:id/score-events` - Get score events
-- `POST /api/startups/:id/score-events` - Add manual score event
+- `GET /api/startups/:id/analysis-timeline` - Get analysis timeline
+- `POST /api/startups/:id/regenerate-reply` - Regenerate AI draft reply
 
 ### Pitch Decks
 - `POST /api/decks/startup/:startupId` - Upload deck
 - `GET /api/decks/:id` - Get deck details
-- `POST /api/decks/:id/reprocess` - Reprocess with AI
+- `POST /api/decks/:id/analyze` - Analyze deck with AI
 
 ### Emails
 - `GET /api/emails/startup/:startupId` - Get emails for startup
 - `POST /api/emails/:id/match` - Match email to startup
-- `GET /api/emails/contacts/:startupId` - Get contacts
+
+### Inbox (Proposal Queue)
+- `GET /api/inbox` - Get proposal queue
+- `POST /api/inbox/:id/approve` - Approve proposal and create startup
+- `POST /api/inbox/:id/reject` - Reject proposal
 
 ## Scoring System
 
@@ -159,201 +153,28 @@ npm run lint
 
 # Build
 npm run build
-
-# Database studio
-npm run db:studio
 ```
 
-## Production Deployment (Supabase)
+## Deployment
 
-### 1. Create a Supabase Project
-
-1. Go to [supabase.com](https://supabase.com) and create a new project
-2. Note your project reference ID and database password
-
-### 2. Get Connection String
-
-1. Go to **Project Settings > Database**
-2. Copy the **Connection string (URI)**
-3. Choose **Transaction pooler** for serverless deployments (port 6543)
-4. Add `?pgbouncer=true` to the connection string
-
-Example:
-```
-postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres?pgbouncer=true
-```
-
-### 3. Configure Production Environment
-
-Create `apps/api/.env` with production values:
+### Deploy to Firebase
 
 ```bash
-DATABASE_URL="postgresql://postgres.[ref]:[pass]@aws-0-[region].pooler.supabase.com:6543/postgres?pgbouncer=true"
-JWT_SECRET="generate-a-secure-random-string-min-32-chars"
-GEMINI_API_KEY="your-gemini-api-key"
-NODE_ENV=production
-CORS_ORIGIN="https://your-frontend-domain.com"
-BACKUP_ENABLED=false  # Supabase handles backups
+# Deploy everything
+firebase deploy --project startup-tracker-app
+
+# Deploy only functions
+firebase deploy --only functions --project startup-tracker-app
+
+# Deploy only hosting
+npm run build --workspace=@startup-tracker/web
+firebase deploy --only hosting --project startup-tracker-app
 ```
 
-### 4. Run Migrations
+### Live URLs
 
-```bash
-cd apps/api
-npx prisma migrate deploy
-```
-
-### 5. Deploy
-
-**Backend (Railway/Render/Fly.io):**
-- Set environment variables
-- Deploy `apps/api` directory
-- Run `npm run build && npm start`
-
-**Frontend (Vercel/Netlify):**
-- Deploy `apps/web` directory
-- Set `VITE_API_URL` to your backend URL
-
----
-
-## Vercel Deployment (Recommended)
-
-### Architecture Overview
-
-For production, deploy as two separate services:
-- **Frontend**: Vercel (static hosting with edge CDN)
-- **Backend**: Railway, Render, or Fly.io (Node.js runtime)
-
-### Step 1: Deploy Backend (Railway)
-
-Railway is recommended for the Express backend:
-
-1. **Create Railway account** at [railway.app](https://railway.app)
-
-2. **Create new project** and select "Deploy from GitHub repo"
-
-3. **Configure build settings**:
-   - Root Directory: `apps/api`
-   - Build Command: `npm install && npx prisma generate && npm run build`
-   - Start Command: `npm start`
-
-4. **Set environment variables** in Railway dashboard:
-   ```
-   DATABASE_URL=postgresql://postgres.[ref]:[pass]@aws-0-[region].pooler.supabase.com:6543/postgres?pgbouncer=true
-   JWT_SECRET=your-secure-jwt-secret-min-32-chars
-   GEMINI_API_KEY=your-gemini-api-key
-   NODE_ENV=production
-   CORS_ORIGIN=https://your-app.vercel.app
-   PORT=3001
-   ```
-
-5. **Run migrations** (one-time):
-   ```bash
-   # In Railway shell or locally with production DATABASE_URL
-   npx prisma migrate deploy
-   ```
-
-6. **Note your backend URL** (e.g., `https://startup-tracker-api.railway.app`)
-
-### Step 2: Deploy Frontend (Vercel)
-
-1. **Create Vercel account** at [vercel.com](https://vercel.com)
-
-2. **Import your GitHub repository**
-
-3. **Configure project settings**:
-   - Framework Preset: Vite
-   - Root Directory: `apps/web`
-   - Build Command: `cd ../.. && npm install && npm run build --workspace=@startup-tracker/web`
-   - Output Directory: `dist`
-   - Install Command: `cd ../.. && npm install`
-
-4. **Set environment variables**:
-   ```
-   VITE_API_URL=https://your-backend.railway.app/api
-   ```
-
-5. **Deploy**
-
-### Step 3: Configure CORS
-
-Update your backend's `CORS_ORIGIN` environment variable to match your Vercel domain:
-```
-CORS_ORIGIN=https://your-app.vercel.app
-```
-
-### Alternative: Vercel CLI Deployment
-
-```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# Deploy frontend
-cd apps/web
-vercel --prod
-
-# Follow prompts to configure project
-```
-
-### Environment Variables Summary
-
-**Backend (Railway/Render)**:
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | Supabase PostgreSQL connection string |
-| `JWT_SECRET` | Secure random string (min 32 chars) |
-| `GEMINI_API_KEY` | Google Gemini API key |
-| `NODE_ENV` | Set to `production` |
-| `CORS_ORIGIN` | Your Vercel frontend URL |
-| `PORT` | 3001 (or as assigned by platform) |
-
-**Frontend (Vercel)**:
-| Variable | Description |
-|----------|-------------|
-| `VITE_API_URL` | Full URL to your backend API (e.g., `https://api.example.com/api`) |
-
-### Troubleshooting
-
-**CORS errors**: Ensure `CORS_ORIGIN` in backend matches your Vercel domain exactly
-
-**Database connection issues**: Use the Transaction Pooler connection string (port 6543) for serverless
-
-**Build failures**: Ensure all workspace dependencies are installed before building
-
-### Supabase Features
-
-- **Automatic Backups**: Daily backups included (Pro plan: point-in-time recovery)
-- **Connection Pooling**: Built-in PgBouncer for efficient connections
-- **Dashboard**: Manage data via Supabase Studio
-- **Storage**: Use Supabase Storage for pitch deck files
-
----
-
-## Local Development
-
-### Database Backup (SQLite - local only)
-
-For local development with SQLite, automatic backups are available:
-
-- **Automatic backups**: Every 6 hours (configurable)
-- **Startup backup**: Created when the server starts
-- **Manual backups**: Available via Settings > Integrations > Database & Backups
-
-Configure in `.env`:
-
-```bash
-BACKUP_ENABLED=true          # Enable/disable automatic backups
-BACKUP_INTERVAL_HOURS=6      # Hours between automatic backups
-BACKUP_MAX_COUNT=10          # Maximum number of backups to keep
-```
-
-### Backup API Endpoints (local SQLite only)
-
-- `GET /api/backup/status` - Get backup status and database stats
-- `GET /api/backup/list` - List all available backups
-- `POST /api/backup/create` - Create a manual backup
-- `GET /api/backup/integrity` - Check database integrity
-- `POST /api/backup/restore` - Restore from a backup (requires admin)
+- **Frontend**: https://startup-tracker-app.web.app
+- **Backend**: https://us-central1-startup-tracker-app.cloudfunctions.net/api
 
 ## License
 
