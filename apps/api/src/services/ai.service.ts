@@ -208,33 +208,127 @@ Return ONLY valid JSON, no other text.`;
 
   /**
    * Generate a draft reply email for a startup founder
+   * Now includes email context, conversation history, and pitch deck analysis
    */
-  async generateDraftReply(startup: {
-    name: string;
-    founderName?: string | null;
-    founderEmail?: string | null;
-    description?: string | null;
-  }, analysis: BusinessModelAnalysis): Promise<string> {
+  async generateDraftReply(
+    startup: {
+      name: string;
+      founderName?: string | null;
+      founderEmail?: string | null;
+      description?: string | null;
+    },
+    analysis: BusinessModelAnalysis,
+    context?: {
+      originalEmail?: {
+        subject?: string;
+        body?: string;
+        from?: string;
+        date?: string;
+      };
+      emailHistory?: Array<{
+        subject: string;
+        body: string;
+        from: string;
+        date: string;
+        direction: 'inbound' | 'outbound';
+      }>;
+      pitchDeckAnalysis?: {
+        strengths?: string[];
+        weaknesses?: string[];
+        questions?: string[];
+        summary?: string;
+        extractedData?: {
+          problem?: string;
+          solution?: string;
+          traction?: Record<string, unknown>;
+          team?: Array<{ name?: string; role?: string }>;
+          askAmount?: string;
+        };
+      };
+    }
+  ): Promise<string> {
     const founderFirstName = startup.founderName?.split(' ')[0] || 'there';
+
+    // Build context sections
+    let emailContextSection = '';
+    if (context?.originalEmail) {
+      emailContextSection = `
+ORIGINAL EMAIL FROM FOUNDER:
+- Subject: ${context.originalEmail.subject || 'Not provided'}
+- Date: ${context.originalEmail.date || 'Unknown'}
+- Content: ${(context.originalEmail.body || '').substring(0, 1500)}
+`;
+    }
+
+    let conversationHistorySection = '';
+    if (context?.emailHistory && context.emailHistory.length > 0) {
+      conversationHistorySection = `
+PREVIOUS CONVERSATION (${context.emailHistory.length} emails):
+${context.emailHistory.slice(-5).map((email, i) => `
+[${email.direction === 'inbound' ? 'FROM FOUNDER' : 'SENT'}] ${email.date}
+Subject: ${email.subject}
+${email.body.substring(0, 500)}${email.body.length > 500 ? '...' : ''}
+`).join('\n---\n')}
+`;
+    }
+
+    let pitchDeckSection = '';
+    if (context?.pitchDeckAnalysis) {
+      const deck = context.pitchDeckAnalysis;
+      pitchDeckSection = `
+PITCH DECK ANALYSIS:
+${deck.summary ? `Summary: ${deck.summary}` : ''}
+${deck.extractedData?.problem ? `Problem: ${deck.extractedData.problem}` : ''}
+${deck.extractedData?.solution ? `Solution: ${deck.extractedData.solution}` : ''}
+${deck.extractedData?.askAmount ? `Funding Ask: ${deck.extractedData.askAmount}` : ''}
+${deck.extractedData?.team?.length ? `Team: ${deck.extractedData.team.map(t => `${t.name || 'Unknown'} (${t.role || 'Team'})`).join(', ')}` : ''}
+${deck.extractedData?.traction ? `Traction: ${JSON.stringify(deck.extractedData.traction)}` : ''}
+
+Strengths from Deck:
+${deck.strengths?.map((s, i) => `${i + 1}. ${s}`).join('\n') || 'None identified'}
+
+Concerns from Deck:
+${deck.weaknesses?.map((w, i) => `${i + 1}. ${w}`).join('\n') || 'None identified'}
+
+Questions from Deck Analysis:
+${deck.questions?.map((q, i) => `${i + 1}. ${q}`).join('\n') || 'None'}
+`;
+    }
 
     const prompt = `You are a professional investor responding to a startup pitch. Write a warm, professional reply email that:
 
 1. Thanks the founder for reaching out
-2. Shows genuine interest in their startup
-3. Asks 3-4 focused questions that will help evaluate the opportunity
-4. Keeps it concise and easy for the founder to respond to
-5. Avoids going into unnecessary details early on - we want to make it easy for the founder to reply
+2. References specific details from their email/pitch deck to show you've reviewed their materials
+3. Shows genuine interest in their startup
+4. Asks 3-4 focused questions that will help evaluate the opportunity (prioritize questions about gaps in the pitch deck or concerns identified)
+5. Keeps it concise and easy for the founder to respond to
+6. If there's conversation history, acknowledge previous exchanges and build on them
 
 STARTUP INFO:
 - Name: ${startup.name}
 - Founder: ${startup.founderName || 'Unknown'}
 - Description: ${startup.description || 'Not provided'}
+${emailContextSection}
+${conversationHistorySection}
+${pitchDeckSection}
 
-KEY QUESTIONS FROM ANALYSIS (pick the most relevant 3-4):
+BUSINESS MODEL ANALYSIS:
+- Sector: ${analysis.sector}
+- Business Type: ${analysis.businessModel.type}
+- Value Proposition: ${analysis.businessModel.valueProposition}
+- Market Size: ${analysis.marketAnalysis.marketSize}
+
+KEY QUESTIONS FROM ANALYSIS (incorporate the most relevant 2-3):
 ${analysis.keyQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
 
 CONCERNS TO SUBTLY ADDRESS:
-${analysis.concerns.slice(0, 2).map((c, i) => `${i + 1}. ${c}`).join('\n')}
+${analysis.concerns.slice(0, 3).map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+IMPORTANT INSTRUCTIONS:
+- Reference specific details from the pitch deck or email to show genuine engagement
+- If there are gaps in the pitch deck (missing traction, unclear business model, etc.), ask about those specifically
+- Avoid generic questions - make them specific to this startup
+- If this is a follow-up (previous conversation exists), don't repeat questions already asked
 
 Write the email body only (no subject line). Start with "Hi ${founderFirstName}," and end with exactly this signature (no variations):
 
@@ -242,7 +336,7 @@ Best regards,
 Agent Jarvis
 (on behalf of Nitish Mittersain)
 
-Keep it under 150 words. Be warm but professional. Focus on questions that are easy for a founder to answer quickly.`;
+Keep it under 200 words. Be warm but professional. Focus on questions that are easy for a founder to answer quickly.`;
 
     const text = await this.callGemini(prompt);
     // Ensure the signature is correct and consistent
@@ -412,16 +506,46 @@ Return ONLY valid JSON.`;
   /**
    * Full startup onboarding analysis: business model + draft reply
    */
-  async analyzeAndDraftReply(startup: {
-    name: string;
-    description?: string | null;
-    website?: string | null;
-    founderName?: string | null;
-    founderEmail?: string | null;
-    askAmount?: string | null;
-    stage?: string | null;
-    extractedData?: Record<string, unknown> | null;
-  }): Promise<{
+  async analyzeAndDraftReply(
+    startup: {
+      name: string;
+      description?: string | null;
+      website?: string | null;
+      founderName?: string | null;
+      founderEmail?: string | null;
+      askAmount?: string | null;
+      stage?: string | null;
+      extractedData?: Record<string, unknown> | null;
+    },
+    context?: {
+      originalEmail?: {
+        subject?: string;
+        body?: string;
+        from?: string;
+        date?: string;
+      };
+      emailHistory?: Array<{
+        subject: string;
+        body: string;
+        from: string;
+        date: string;
+        direction: 'inbound' | 'outbound';
+      }>;
+      pitchDeckAnalysis?: {
+        strengths?: string[];
+        weaknesses?: string[];
+        questions?: string[];
+        summary?: string;
+        extractedData?: {
+          problem?: string;
+          solution?: string;
+          traction?: Record<string, unknown>;
+          team?: Array<{ name?: string; role?: string }>;
+          askAmount?: string;
+        };
+      };
+    }
+  ): Promise<{
     analysis: BusinessModelAnalysis;
     draftReply: string;
     sector: string;
@@ -430,8 +554,8 @@ Return ONLY valid JSON.`;
     // Step 1: Analyze business model
     const analysis = await this.analyzeBusinessModel(startup);
 
-    // Step 2: Generate draft reply
-    const draftReply = await this.generateDraftReply(startup, analysis);
+    // Step 2: Generate draft reply with full context
+    const draftReply = await this.generateDraftReply(startup, analysis, context);
 
     return {
       analysis,

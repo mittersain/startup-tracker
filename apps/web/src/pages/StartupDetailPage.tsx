@@ -30,6 +30,7 @@ import {
   ArrowDownLeft,
   Pencil,
   Save,
+  RefreshCw,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -158,6 +159,21 @@ export default function StartupDetailPage() {
     },
     onError: () => {
       toast.error('Failed to update draft reply');
+    },
+  });
+
+  const regenerateReplyMutation = useMutation({
+    mutationFn: () => startupsApi.regenerateDraftReply(id!),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      const contextInfo = [];
+      if (data.context?.hasOriginalEmail) contextInfo.push('original email');
+      if (data.context?.emailHistoryCount > 0) contextInfo.push(`${data.context.emailHistoryCount} emails`);
+      if (data.context?.hasPitchDeckAnalysis) contextInfo.push('pitch deck');
+      toast.success(`Draft reply regenerated using: ${contextInfo.join(', ') || 'available context'}`);
+    },
+    onError: () => {
+      toast.error('Failed to regenerate draft reply');
     },
   });
 
@@ -692,6 +708,21 @@ export default function StartupDetailPage() {
                   </span>
                   {startup.draftReplyStatus !== 'sent' && (
                     <button
+                      onClick={() => regenerateReplyMutation.mutate()}
+                      disabled={regenerateReplyMutation.isPending}
+                      className="btn btn-secondary btn-sm flex items-center gap-1"
+                      title="Regenerate using emails, pitch deck, and conversation history"
+                    >
+                      {regenerateReplyMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
+                      {regenerateReplyMutation.isPending ? 'Regenerating...' : 'Regenerate'}
+                    </button>
+                  )}
+                  {startup.draftReplyStatus !== 'sent' && (
+                    <button
                       onClick={() => {
                         setEditedReply(startup.draftReply || '');
                         setIsEditingReply(true);
@@ -765,7 +796,22 @@ export default function StartupDetailPage() {
             ) : (
               <div className="text-center py-8">
                 <Mail className="w-10 h-10 mx-auto text-gray-400 mb-3" />
-                <p className="text-gray-500">No draft reply generated.</p>
+                <p className="text-gray-500 mb-4">No draft reply generated.</p>
+                <button
+                  onClick={() => regenerateReplyMutation.mutate()}
+                  disabled={regenerateReplyMutation.isPending}
+                  className="btn btn-primary flex items-center gap-2 mx-auto"
+                >
+                  {regenerateReplyMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Brain className="w-4 h-4" />
+                  )}
+                  {regenerateReplyMutation.isPending ? 'Generating...' : 'Generate Reply with AI'}
+                </button>
+                <p className="text-xs text-gray-400 mt-2">
+                  Uses pitch deck, emails, and conversation history for context
+                </p>
               </div>
             )}
           </div>

@@ -296,7 +296,13 @@ export class EmailInboxService {
   async createStartupFromProposal(
     proposal: ExtractedStartupProposal,
     organizationId: string,
-    userId: string
+    userId: string,
+    emailContext?: {
+      subject?: string;
+      body?: string;
+      from?: string;
+      date?: string;
+    }
   ): Promise<string> {
     // Map stage string to enum value
     const stageMap: Record<string, string> = {
@@ -321,16 +327,19 @@ export class EmailInboxService {
     if (aiService.enabled) {
       try {
         console.log(`[StartupCreation] Running AI analysis for ${proposal.startupName}...`);
-        const analysisResult = await aiService.analyzeAndDraftReply({
-          name: proposal.startupName,
-          description: proposal.description,
-          website: proposal.website,
-          founderName: proposal.founderName,
-          founderEmail: proposal.founderEmail,
-          askAmount: proposal.askAmount,
-          stage: proposal.stage,
-          extractedData: proposal as unknown as Record<string, unknown>,
-        });
+        const analysisResult = await aiService.analyzeAndDraftReply(
+          {
+            name: proposal.startupName,
+            description: proposal.description,
+            website: proposal.website,
+            founderName: proposal.founderName,
+            founderEmail: proposal.founderEmail,
+            askAmount: proposal.askAmount,
+            stage: proposal.stage,
+            extractedData: proposal as unknown as Record<string, unknown>,
+          },
+          emailContext ? { originalEmail: emailContext } : undefined
+        );
 
         businessModelAnalysis = analysisResult.analysis as unknown as Record<string, unknown>;
         draftReply = analysisResult.draftReply;
@@ -692,7 +701,7 @@ export class EmailInboxService {
       throw new Error('Proposal already processed');
     }
 
-    // Create the startup from the queued data
+    // Create the startup from the queued data with email context
     const extractedData = proposal.extractedData as ExtractedStartupProposal | null;
 
     const startupId = await this.createStartupFromProposal(
@@ -709,7 +718,16 @@ export class EmailInboxService {
         ...extractedData,
       } as ExtractedStartupProposal,
       proposal.organizationId,
-      userId
+      userId,
+      // Pass the original email context for better draft reply generation
+      {
+        subject: proposal.emailSubject,
+        body: proposal.emailPreview,
+        from: proposal.emailFromName
+          ? `${proposal.emailFromName} <${proposal.emailFrom}>`
+          : proposal.emailFrom,
+        date: proposal.emailDate.toISOString(),
+      }
     );
 
     // Create an Email record for the original proposal email

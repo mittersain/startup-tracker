@@ -502,3 +502,201 @@ startupsRouter.post(
     }
   }
 );
+
+// Regenerate draft reply with full context (emails, attachments, pitch deck)
+startupsRouter.post(
+  '/:id/regenerate-reply',
+  [param('id').isUUID()],
+  validate,
+  checkStartupAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) {
+        throw new AppError(401, 'UNAUTHORIZED', 'Authentication required');
+      }
+
+      const startupId = getParamString(req.params, 'id');
+
+      // Get startup with all related data
+      const startup = await prisma.startup.findUnique({
+        where: { id: startupId },
+        include: {
+          contacts: {
+            where: { role: 'Founder' },
+            take: 1,
+          },
+          pitchDecks: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+        },
+      });
+
+      if (!startup) {
+        throw new AppError(404, 'NOT_FOUND', 'Startup not found');
+      }
+
+      // Get email history for this startup
+      const emails = await prisma.email.findMany({
+        where: { startupId },
+        orderBy: { receivedAt: 'asc' },
+        take: 10,
+      });
+
+      // Get the original proposal email if exists
+      const proposalQueue = await prisma.proposalQueue.findFirst({
+        where: { createdStartupId: startupId },
+      });
+
+      // Import AI service dynamically to avoid circular dependencies
+      const { aiService } = await import('../services/ai.service.js');
+
+      if (!aiService.enabled) {
+        throw new AppError(400, 'AI_DISABLED', 'AI features are not enabled');
+      }
+
+      // Get business model analysis or create one
+      let businessAnalysis = startup.businessModelAnalysis as import('../services/ai.service.js').BusinessModelAnalysis | null;
+
+      if (!businessAnalysis) {
+        businessAnalysis = await aiService.analyzeBusinessModel({
+          name: startup.name,
+          description: startup.description,
+          website: startup.website,
+          founderName: startup.contacts[0]?.name,
+          askAmount: null,
+          stage: startup.stage,
+          extractedData: null,
+        });
+      }
+
+      // Build context for draft reply generation
+      const context: {
+        originalEmail?: {
+          subject?: string;
+          body?: string;
+          from?: string;
+          date?: string;
+        };
+        emailHistory?: Array<{
+          subject: string;
+          body: string;
+          from: string;
+          date: string;
+          direction: 'inbound' | 'outbound';
+        }>;
+        pitchDeckAnalysis?: {
+          strengths?: string[];
+          weaknesses?: string[];
+          questions?: string[];
+          summary?: string;
+          extractedData?: {
+            problem?: string;
+            solution?: string;
+            traction?: Record<string, unknown>;
+            team?: Array<{ name?: string; role?: string }>;
+            askAmount?: string;
+          };
+        };
+      } = {};
+
+      // Add original email context
+      if (proposalQueue) {
+        context.originalEmail = {
+          subject: proposalQueue.emailSubject,
+          body: proposalQueue.emailPreview,
+          from: proposalQueue.emailFromName
+            ? `${proposalQueue.emailFromName} <${proposalQueue.emailFrom}>`
+            : proposalQueue.emailFrom,
+          date: proposalQueue.emailDate.toISOString(),
+        };
+      }
+
+      // Add email history
+      if (emails.length > 0) {
+        context.emailHistory = emails.map((email) => ({
+          subject: email.subject,
+          body: email.bodyPreview || '',
+          from: email.fromName
+            ? `${email.fromName} <${email.fromAddress}>`
+            : email.fromAddress,
+          date: email.receivedAt.toISOString(),
+          direction: email.direction as 'inbound' | 'outbound',
+        }));
+      }
+
+      // Add pitch deck analysis
+      const latestDeck = startup.pitchDecks[0];
+      if (latestDeck?.aiAnalysis) {
+        const deckAnalysis = latestDeck.aiAnalysis as Record<string, unknown>;
+        const extractedData = latestDeck.extractedData as Record<string, unknown> | null;
+
+        context.pitchDeckAnalysis = {
+          strengths: deckAnalysis.strengths as string[] | undefined,
+          weaknesses: deckAnalysis.weaknesses as string[] | undefined,
+          questions: deckAnalysis.questions as string[] | undefined,
+          summary: deckAnalysis.summary as string | undefined,
+          extractedData: extractedData
+            ? {
+                problem: extractedData.problem as string | undefined,
+                solution: extractedData.solution as string | undefined,
+                traction: extractedData.traction as Record<string, unknown> | undefined,
+                team: extractedData.team as Array<{ name?: string; role?: string }> | undefined,
+                askAmount: extractedData.askAmount as string | undefined,
+              }
+            : undefined,
+        };
+      }
+
+      // Generate new draft reply with full context
+      const draftReply = await aiService.generateDraftReply(
+        {
+          name: startup.name,
+          founderName: startup.contacts[0]?.name,
+          founderEmail: startup.contacts[0]?.email,
+          description: startup.description,
+        },
+        businessAnalysis,
+        context
+      );
+
+      // Update startup with new draft reply
+      await prisma.startup.update({
+        where: { id: startupId },
+        data: {
+          draftReply,
+          draftReplyStatus: 'pending',
+          businessModelAnalysis: businessAnalysis as unknown as object,
+          analysisUpdatedAt: new Date(),
+        },
+      });
+
+      // Log activity
+      await prisma.activityLog.create({
+        data: {
+          organizationId: req.user.organizationId,
+          userId: req.user.id,
+          startupId,
+          action: 'draft_reply_regenerated',
+          details: JSON.stringify({
+            hasEmailContext: !!context.originalEmail,
+            emailHistoryCount: context.emailHistory?.length || 0,
+            hasPitchDeckAnalysis: !!context.pitchDeckAnalysis,
+          }),
+        },
+      });
+
+      res.json({
+        success: true,
+        draftReply,
+        context: {
+          hasOriginalEmail: !!context.originalEmail,
+          emailHistoryCount: context.emailHistory?.length || 0,
+          hasPitchDeckAnalysis: !!context.pitchDeckAnalysis,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);

@@ -153,6 +153,11 @@ export const startupsApi = {
     const response = await api.patch(`/startups/${id}/draft-reply`, { draftReply });
     return response.data;
   },
+
+  regenerateDraftReply: async (id: string) => {
+    const response = await api.post(`/startups/${id}/regenerate-reply`);
+    return response.data;
+  },
 };
 
 // Decks API
