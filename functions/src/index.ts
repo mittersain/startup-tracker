@@ -1214,6 +1214,40 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // Create initial analysis event for the timeline
+    const initialInsights: string[] = [];
+    if (proposalData.description) initialInsights.push(`Company: ${proposalData.description}`);
+    if (proposalData.founderName) initialInsights.push(`Founder: ${proposalData.founderName}`);
+    if (proposalData.stage) initialInsights.push(`Stage: ${proposalData.stage}`);
+    if (proposalData.askAmount) initialInsights.push(`Raising: ${proposalData.askAmount}`);
+
+    const cumulativeAnalysis: Record<string, unknown> = {
+      problem: undefined,
+      solution: proposalData.description || undefined,
+      founders: proposalData.founderName ? [{ name: proposalData.founderName, role: 'Founder' }] : undefined,
+      askAmount: proposalData.askAmount || undefined,
+      strengths: aiAnalysis?.businessModelAnalysis?.strengths || [],
+      weaknesses: aiAnalysis?.businessModelAnalysis?.concerns || [],
+      unansweredQuestions: aiAnalysis?.businessModelAnalysis?.keyQuestions || [],
+      answeredQuestions: [],
+      confidenceLevel: aiAnalysis ? 40 : 20,
+    };
+
+    await db.collection('analysisEvents').add({
+      startupId: startupRef.id,
+      sourceType: 'initial',
+      sourceName: proposalData.emailSubject || 'Initial Proposal',
+      inputSummary: `Email: "${proposalData.emailSubject}"`,
+      newInsights: initialInsights.length > 0 ? initialInsights : undefined,
+      concerns: aiAnalysis?.businessModelAnalysis?.concerns || undefined,
+      questions: aiAnalysis?.businessModelAnalysis?.keyQuestions || undefined,
+      cumulativeAnalysis,
+      overallConfidence: cumulativeAnalysis.confidenceLevel as number / 100,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    console.log(`[Approve] Created initial analysis event for ${proposalData.startupName}`);
+
     // Update proposal status
     await proposalRef.update({ status: 'approved', linkedStartupId: startupRef.id, emailId: emailRef.id });
 
@@ -1723,6 +1757,64 @@ Respond with ONLY the JSON object.`;
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
         }
+
+        // Create analysis event for the timeline
+        try {
+          // Get previous analysis to build cumulative state
+          const prevEventsSnapshot = await db.collection('analysisEvents')
+            .where('startupId', '==', startupId)
+            .get();
+
+          let previousAnalysis: Record<string, unknown> | null = null;
+          if (!prevEventsSnapshot.empty) {
+            const prevEvents = prevEventsSnapshot.docs.map(d => ({
+              createdAt: d.data().createdAt?.toDate?.() || new Date(0),
+              data: d.data(),
+            }));
+            prevEvents.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+            previousAnalysis = prevEvents[0]?.data?.cumulativeAnalysis as Record<string, unknown> || null;
+          }
+
+          const cumulativeAnalysis: Record<string, unknown> = previousAnalysis || {
+            strengths: [],
+            weaknesses: [],
+            unansweredQuestions: [],
+            answeredQuestions: [],
+            confidenceLevel: 0,
+          };
+
+          // Merge new strengths/weaknesses
+          const existingStrengths = (cumulativeAnalysis.strengths as string[]) || [];
+          const existingWeaknesses = (cumulativeAnalysis.weaknesses as string[]) || [];
+
+          for (const s of analysis.strengths || []) {
+            if (!existingStrengths.includes(s)) existingStrengths.push(s);
+          }
+          for (const w of analysis.weaknesses || []) {
+            if (!existingWeaknesses.includes(w)) existingWeaknesses.push(w);
+          }
+
+          cumulativeAnalysis.strengths = existingStrengths;
+          cumulativeAnalysis.weaknesses = existingWeaknesses;
+          cumulativeAnalysis.confidenceLevel = Math.min(((cumulativeAnalysis.confidenceLevel as number) || 0) + 15, 85);
+
+          await db.collection('analysisEvents').add({
+            startupId,
+            sourceType: 'deck',
+            sourceId: deckId,
+            sourceName: fileName,
+            inputSummary: `Pitch deck: ${fileName}`,
+            newInsights: analysis.strengths || [],
+            concerns: analysis.weaknesses || [],
+            cumulativeAnalysis,
+            overallConfidence: (cumulativeAnalysis.confidenceLevel as number) / 100,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          console.log(`[Deck Analysis] Created analysis event for ${fileName}`);
+        } catch (eventError) {
+          console.error('[Deck Analysis] Failed to create analysis event:', eventError);
+        }
       }
 
       console.log(`[Deck Analysis] Completed for ${fileName}, score: ${analysis.score}`);
@@ -1967,6 +2059,172 @@ app.patch('/startups/:id/draft-reply', authenticate, async (req: AuthRequest, re
   } catch (error) {
     console.error('Update draft reply error:', error);
     return res.status(500).json({ error: 'Failed to update draft reply' });
+  }
+});
+
+// Regenerate draft reply with full context
+app.post('/startups/:id/regenerate-reply', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    if (startupData.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Get all emails for context
+    const emailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const emailHistory = emailsSnapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        subject: data.subject,
+        body: data.body || data.bodyPreview,
+        from: data.from,
+        date: data.date?.toDate?.()?.toISOString() || data.date,
+        direction: data.direction || 'inbound',
+      };
+    });
+
+    // Get all decks for analysis context
+    const decksSnapshot = await db.collection('decks')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const deckAnalyses = decksSnapshot.docs
+      .map(doc => doc.data().aiAnalysis)
+      .filter(a => a && !a.error);
+
+    // Consolidate deck analyses
+    const allStrengths: string[] = [];
+    const allWeaknesses: string[] = [];
+    const allQuestions: string[] = [];
+
+    for (const analysis of deckAnalyses) {
+      if (analysis.strengths) {
+        for (const s of analysis.strengths) {
+          if (!allStrengths.includes(s)) allStrengths.push(s);
+        }
+      }
+      if (analysis.weaknesses) {
+        for (const w of analysis.weaknesses) {
+          if (!allWeaknesses.includes(w)) allWeaknesses.push(w);
+        }
+      }
+    }
+
+    // Generate new draft reply with AI
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `You are an investor responding to a startup founder's pitch. Generate a professional, personalized email reply.
+
+STARTUP INFO:
+Name: ${startupData.name}
+Description: ${startupData.description || 'Not provided'}
+Founder: ${startupData.founderName || 'Unknown'}
+Stage: ${startupData.stage || 'Unknown'}
+
+${emailHistory.length > 0 ? `EMAIL HISTORY:
+${emailHistory.map(e => `[${e.direction}] ${e.subject}: ${e.body?.substring(0, 500) || ''}`).join('\n\n')}` : ''}
+
+${allStrengths.length > 0 ? `PITCH DECK STRENGTHS:
+${allStrengths.join('\n')}` : ''}
+
+${allWeaknesses.length > 0 ? `PITCH DECK CONCERNS:
+${allWeaknesses.join('\n')}` : ''}
+
+IMPORTANT: Include this exact phrase in your reply:
+"I've received the attachment. To streamline things, could you please answer the following questions directly in your email response?"
+
+Then ask 2-3 specific questions based on the deck analysis and any gaps in information.
+
+Generate a warm but professional reply. Sign as "Nitish".
+Return ONLY the email text, no JSON or markdown.`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const draftReply = response.text();
+
+    // Update startup with new draft reply
+    await db.collection('startups').doc(startupId).update({
+      draftReply,
+      draftReplyStatus: 'pending',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      draftReply,
+      context: {
+        hasOriginalEmail: emailHistory.length > 0,
+        emailHistoryCount: emailHistory.length,
+        hasPitchDeckAnalysis: deckAnalyses.length > 0,
+      },
+    });
+  } catch (error) {
+    console.error('Regenerate reply error:', error);
+    return res.status(500).json({ error: 'Failed to regenerate reply' });
+  }
+});
+
+// ==================== ANALYSIS TIMELINE ROUTES ====================
+
+// Get analysis timeline for a startup
+app.get('/startups/:id/analysis-timeline', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+
+    // Verify startup exists and belongs to user's org
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists || startupDoc.data()?.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    // Get all analysis events for this startup
+    const eventsSnapshot = await db.collection('analysisEvents')
+      .where('startupId', '==', startupId)
+      .get();
+
+    let events = eventsSnapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        sourceType: data.sourceType,
+        sourceName: data.sourceName,
+        inputSummary: data.inputSummary,
+        newInsights: data.newInsights,
+        updatedInsights: data.updatedInsights,
+        confirmedInsights: data.confirmedInsights,
+        concerns: data.concerns,
+        questions: data.questions,
+        overallConfidence: data.overallConfidence,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+      };
+    });
+
+    // Sort by createdAt ascending
+    events.sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+
+    // Get the latest cumulative analysis
+    const latestEvent = events[events.length - 1];
+    const latestEventDoc = latestEvent ? await db.collection('analysisEvents').doc(latestEvent.id).get() : null;
+    const cumulativeAnalysis = latestEventDoc?.data()?.cumulativeAnalysis || null;
+
+    return res.json({
+      timeline: events,
+      cumulativeAnalysis,
+      totalEvents: events.length,
+    });
+  } catch (error) {
+    console.error('Get analysis timeline error:', error);
+    return res.json({ timeline: [], cumulativeAnalysis: null, totalEvents: 0 });
   }
 });
 
