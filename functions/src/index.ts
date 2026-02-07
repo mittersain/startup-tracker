@@ -6,6 +6,7 @@ import * as admin from 'firebase-admin';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { ImapFlow } from 'imapflow';
@@ -13,6 +14,8 @@ import { simpleParser, ParsedMail } from 'mailparser';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Busboy from 'busboy';
 import * as nodemailer from 'nodemailer';
+import sanitizeHtml from 'sanitize-html';
+import { z } from 'zod';
 
 // Initialize Gemini AI
 // Note: Using fallback for Firebase deployment compatibility, but functions will validate at runtime
@@ -438,14 +441,79 @@ const db = admin.firestore();
 // Note: Using fallback for Firebase deployment compatibility, validate in production
 const JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER_JWT_SECRET_SET_IN_PRODUCTION';
 
+// ==================== ZOD VALIDATION SCHEMAS ====================
+
+// Comment validation schema
+const commentSchema = z.object({
+  content: z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+  parentId: z.string().optional().nullable(),
+  mentions: z.array(z.string()).optional().default([]),
+});
+
+// Invite validation schema
+const inviteSchema = z.object({
+  email: z.string().email('Valid email is required'),
+  accessLevel: z.enum(['view', 'comment'], { errorMap: () => ({ message: 'Access level must be view or comment' }) }),
+});
+
+// Co-investor comment validation schema
+const coInvestorCommentSchema = z.object({
+  content: z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+  name: z.string().min(1, 'Name is required').max(100, 'Name is too long').optional(),
+});
+
+// HTML sanitization config - strip all HTML tags for plain text
+const sanitizeConfig = {
+  allowedTags: [],
+  allowedAttributes: {},
+  disallowedTagsMode: 'discard' as const,
+};
+
+// Helper to sanitize user content
+function sanitizeContent(content: string): string {
+  return sanitizeHtml(content, sanitizeConfig).trim();
+}
+
 // Create Express app
 const app = express();
+
+// ==================== RATE LIMITING ====================
+
+// General rate limiter (100 requests per 15 minutes)
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Auth rate limiter (5 requests per minute - stricter for login/register)
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Too many authentication attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Public endpoint rate limiter (for magic links - 20 per minute)
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Apply general rate limiting to all routes
+app.use(generalLimiter);
 
 // Health check
 app.get('/health', (_req, res) => {
@@ -460,7 +528,8 @@ app.use((req, _res, next) => {
 
 // ==================== AUTH ROUTES ====================
 
-app.post('/auth/register', async (req, res) => {
+// Apply stricter rate limiting to auth endpoints
+app.post('/auth/register', authLimiter, async (req, res) => {
   try {
     const { email, password, name, organizationName } = req.body;
 
@@ -513,7 +582,7 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -5731,9 +5800,20 @@ app.get('/startups/:id/comments', authenticate, async (req: AuthRequest, res) =>
 app.post('/startups/:id/comments', authenticate, async (req: AuthRequest, res) => {
   try {
     const startupId = req.params.id as string;
-    const { content, parentId, mentions } = req.body;
 
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    // Validate input with Zod
+    const validationResult = commentSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      return res.status(400).json({
+        error: validationResult.error.errors[0]?.message || 'Invalid input'
+      });
+    }
+
+    const { content, parentId, mentions } = validationResult.data;
+
+    // Sanitize content to prevent XSS
+    const sanitizedContent = sanitizeContent(content);
+    if (sanitizedContent.length === 0) {
       return res.status(400).json({ error: 'Comment content is required' });
     }
 
@@ -5758,7 +5838,7 @@ app.post('/startups/:id/comments', authenticate, async (req: AuthRequest, res) =
       authorId: req.user!.userId,
       authorName: userData?.name || 'Unknown User',
       authorEmail: userData?.email || '',
-      content: content.trim(),
+      content: sanitizedContent,
       parentId: parentId || null,
       mentions: mentions || [],
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -5806,9 +5886,21 @@ app.post('/startups/:id/comments', authenticate, async (req: AuthRequest, res) =
 app.put('/comments/:id', authenticate, async (req: AuthRequest, res) => {
   try {
     const commentId = req.params.id as string;
-    const { content } = req.body;
 
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    // Validate content with Zod schema (only content field needed for update)
+    const contentSchema = z.object({
+      content: z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+    });
+    const validationResult = contentSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      return res.status(400).json({
+        error: validationResult.error.errors[0]?.message || 'Invalid input'
+      });
+    }
+
+    // Sanitize content
+    const sanitizedContent = sanitizeContent(validationResult.data.content);
+    if (sanitizedContent.length === 0) {
       return res.status(400).json({ error: 'Comment content is required' });
     }
 
@@ -5825,7 +5917,7 @@ app.put('/comments/:id', authenticate, async (req: AuthRequest, res) => {
     }
 
     await db.collection('comments').doc(commentId).update({
-      content: content.trim(),
+      content: sanitizedContent,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       editedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -5905,16 +5997,16 @@ app.get('/startups/:id/invites', authenticate, async (req: AuthRequest, res) => 
 app.post('/startups/:id/invite', authenticate, async (req: AuthRequest, res) => {
   try {
     const startupId = req.params.id as string;
-    const { email, accessLevel } = req.body;
 
-    if (!email || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Email is required' });
+    // Validate input with Zod
+    const validationResult = inviteSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      return res.status(400).json({
+        error: validationResult.error.errors[0]?.message || 'Invalid input'
+      });
     }
 
-    const validAccessLevels = ['view', 'comment'];
-    if (!accessLevel || !validAccessLevels.includes(accessLevel)) {
-      return res.status(400).json({ error: 'Invalid access level' });
-    }
+    const { email, accessLevel } = validationResult.data;
 
     // Verify startup exists and user has access
     const startupDoc = await db.collection('startups').doc(startupId).get();
@@ -6011,8 +6103,8 @@ app.post('/startups/:id/invite', authenticate, async (req: AuthRequest, res) => 
   }
 });
 
-// Validate magic link and get deal access
-app.get('/invite/:token', async (req, res) => {
+// Validate magic link and get deal access (public endpoint with rate limiting)
+app.get('/invite/:token', publicLimiter, async (req, res) => {
   try {
     const token = req.params.token as string;
 
@@ -6089,13 +6181,26 @@ app.get('/invite/:token', async (req, res) => {
   }
 });
 
-// Add comment via magic link (for co-investors)
-app.post('/invite/:token/comment', async (req, res) => {
+// Add comment via magic link (for co-investors) - public endpoint with rate limiting
+app.post('/invite/:token/comment', publicLimiter, async (req, res) => {
   try {
     const token = req.params.token as string;
-    const { content, name } = req.body;
 
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    // Validate input with Zod
+    const validationResult = coInvestorCommentSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      return res.status(400).json({
+        error: validationResult.error.errors[0]?.message || 'Invalid input'
+      });
+    }
+
+    const { content, name } = validationResult.data;
+
+    // Sanitize content and name
+    const sanitizedContent = sanitizeContent(content);
+    const sanitizedName = name ? sanitizeContent(name) : undefined;
+
+    if (sanitizedContent.length === 0) {
       return res.status(400).json({ error: 'Comment content is required' });
     }
 
@@ -6131,10 +6236,10 @@ app.post('/invite/:token/comment', async (req, res) => {
       startupId: invite.startupId,
       organizationId: invite.organizationId,
       authorId: `invite:${inviteDoc.id}`,
-      authorName: name || invite.email.split('@')[0],
+      authorName: sanitizedName || invite.email.split('@')[0],
       authorEmail: invite.email,
       isCoInvestor: true,
-      content: content.trim(),
+      content: sanitizedContent,
       parentId: null,
       mentions: [],
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
