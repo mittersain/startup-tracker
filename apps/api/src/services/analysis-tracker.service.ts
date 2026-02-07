@@ -71,16 +71,22 @@ class AnalysisTrackerService {
    * Get the latest cumulative analysis for a startup
    */
   async getLatestAnalysis(startupId: string): Promise<CumulativeAnalysis | null> {
-    const latestEvent = await prisma.analysisEvent.findFirst({
-      where: { startupId },
-      orderBy: { createdAt: 'desc' },
-    });
+    try {
+      const latestEvent = await prisma.analysisEvent.findFirst({
+        where: { startupId },
+        orderBy: { createdAt: 'desc' },
+      });
 
-    if (!latestEvent?.cumulativeAnalysis) {
+      if (!latestEvent?.cumulativeAnalysis) {
+        return null;
+      }
+
+      return latestEvent.cumulativeAnalysis as unknown as CumulativeAnalysis;
+    } catch (error) {
+      // Table might not exist yet
+      console.warn('[AnalysisTracker] getLatestAnalysis failed:', error);
       return null;
     }
-
-    return latestEvent.cumulativeAnalysis as unknown as CumulativeAnalysis;
   }
 
   /**
@@ -97,23 +103,29 @@ class AnalysisTrackerService {
     overallConfidence: number | null;
     createdAt: Date;
   }>> {
-    const events = await prisma.analysisEvent.findMany({
-      where: { startupId },
-      orderBy: { createdAt: 'asc' },
-      select: {
-        id: true,
-        sourceType: true,
-        sourceName: true,
-        inputSummary: true,
-        newInsights: true,
-        concerns: true,
-        questions: true,
-        overallConfidence: true,
-        createdAt: true,
-      },
-    });
+    try {
+      const events = await prisma.analysisEvent.findMany({
+        where: { startupId },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          sourceType: true,
+          sourceName: true,
+          inputSummary: true,
+          newInsights: true,
+          concerns: true,
+          questions: true,
+          overallConfidence: true,
+          createdAt: true,
+        },
+      });
 
-    return events;
+      return events;
+    } catch (error) {
+      // Table might not exist yet
+      console.warn('[AnalysisTracker] getAnalysisTimeline failed:', error);
+      return [];
+    }
   }
 
   /**
@@ -136,52 +148,57 @@ class AnalysisTrackerService {
     },
     deckAnalysis?: AnalysisEventInput['deckAnalysis']
   ): Promise<void> {
-    // Build initial cumulative analysis
-    const initialAnalysis: CumulativeAnalysis = {
-      problem: deckAnalysis?.extractedData?.problem as string || undefined,
-      solution: deckAnalysis?.extractedData?.solution as string || proposal.description || undefined,
-      founders: deckAnalysis?.extractedData?.team as CumulativeAnalysis['founders'] ||
-        (proposal.founderName ? [{ name: proposal.founderName, role: 'Founder' }] : undefined),
-      askAmount: deckAnalysis?.extractedData?.askAmount as string || proposal.askAmount || undefined,
-      traction: deckAnalysis?.extractedData?.traction as Record<string, unknown> || undefined,
-      strengths: deckAnalysis?.analysis?.strengths || [],
-      weaknesses: deckAnalysis?.analysis?.weaknesses || [],
-      unansweredQuestions: deckAnalysis?.analysis?.questions || [],
-      answeredQuestions: [],
-      confidenceLevel: deckAnalysis ? 40 : 20, // Higher confidence if we have a deck
-    };
+    try {
+      // Build initial cumulative analysis
+      const initialAnalysis: CumulativeAnalysis = {
+        problem: deckAnalysis?.extractedData?.problem as string || undefined,
+        solution: deckAnalysis?.extractedData?.solution as string || proposal.description || undefined,
+        founders: deckAnalysis?.extractedData?.team as CumulativeAnalysis['founders'] ||
+          (proposal.founderName ? [{ name: proposal.founderName, role: 'Founder' }] : undefined),
+        askAmount: deckAnalysis?.extractedData?.askAmount as string || proposal.askAmount || undefined,
+        traction: deckAnalysis?.extractedData?.traction as Record<string, unknown> || undefined,
+        strengths: deckAnalysis?.analysis?.strengths || [],
+        weaknesses: deckAnalysis?.analysis?.weaknesses || [],
+        unansweredQuestions: deckAnalysis?.analysis?.questions || [],
+        answeredQuestions: [],
+        confidenceLevel: deckAnalysis ? 40 : 20, // Higher confidence if we have a deck
+      };
 
-    // Build input summary
-    const inputParts: string[] = [];
-    if (emailContext?.subject) inputParts.push(`Email: "${emailContext.subject}"`);
-    if (deckAnalysis) inputParts.push('Pitch deck analyzed');
-    const inputSummary = inputParts.join(', ') || 'Initial proposal received';
+      // Build input summary
+      const inputParts: string[] = [];
+      if (emailContext?.subject) inputParts.push(`Email: "${emailContext.subject}"`);
+      if (deckAnalysis) inputParts.push('Pitch deck analyzed');
+      const inputSummary = inputParts.join(', ') || 'Initial proposal received';
 
-    // Build new insights
-    const newInsights: string[] = [];
-    if (proposal.description) newInsights.push(`Company: ${proposal.description}`);
-    if (proposal.founderName) newInsights.push(`Founder: ${proposal.founderName}`);
-    if (proposal.stage) newInsights.push(`Stage: ${proposal.stage}`);
-    if (proposal.askAmount) newInsights.push(`Raising: ${proposal.askAmount}`);
-    if (deckAnalysis?.analysis?.summary) newInsights.push(deckAnalysis.analysis.summary);
+      // Build new insights
+      const newInsights: string[] = [];
+      if (proposal.description) newInsights.push(`Company: ${proposal.description}`);
+      if (proposal.founderName) newInsights.push(`Founder: ${proposal.founderName}`);
+      if (proposal.stage) newInsights.push(`Stage: ${proposal.stage}`);
+      if (proposal.askAmount) newInsights.push(`Raising: ${proposal.askAmount}`);
+      if (deckAnalysis?.analysis?.summary) newInsights.push(deckAnalysis.analysis.summary);
 
-    await prisma.analysisEvent.create({
-      data: {
-        startupId,
-        sourceType: 'initial',
-        sourceName: emailContext?.subject || 'Initial Proposal',
-        inputSummary,
-        newInsights: newInsights.length > 0 ? newInsights : undefined,
-        concerns: deckAnalysis?.analysis?.weaknesses?.length
-          ? deckAnalysis.analysis.weaknesses
-          : undefined,
-        questions: deckAnalysis?.analysis?.questions?.length
-          ? deckAnalysis.analysis.questions
-          : undefined,
-        cumulativeAnalysis: initialAnalysis as unknown as object,
-        overallConfidence: initialAnalysis.confidenceLevel / 100,
-      },
-    });
+      await prisma.analysisEvent.create({
+        data: {
+          startupId,
+          sourceType: 'initial',
+          sourceName: emailContext?.subject || 'Initial Proposal',
+          inputSummary,
+          newInsights: newInsights.length > 0 ? newInsights : undefined,
+          concerns: deckAnalysis?.analysis?.weaknesses?.length
+            ? deckAnalysis.analysis.weaknesses
+            : undefined,
+          questions: deckAnalysis?.analysis?.questions?.length
+            ? deckAnalysis.analysis.questions
+            : undefined,
+          cumulativeAnalysis: initialAnalysis as unknown as object,
+          overallConfidence: initialAnalysis.confidenceLevel / 100,
+        },
+      });
+    } catch (error) {
+      // Table might not exist yet - log but don't crash
+      console.warn('[AnalysisTracker] createInitialAnalysis failed:', error);
+    }
   }
 
   /**
@@ -193,6 +210,7 @@ class AnalysisTrackerService {
     fileName: string,
     deckAnalysis: NonNullable<AnalysisEventInput['deckAnalysis']>
   ): Promise<void> {
+    try {
     const previousAnalysis = await this.getLatestAnalysis(startupId);
 
     // Build incremental analysis using AI
@@ -304,6 +322,10 @@ class AnalysisTrackerService {
         overallConfidence: updatedAnalysis.confidenceLevel / 100,
       },
     });
+    } catch (error) {
+      // Table might not exist yet - log but don't crash
+      console.warn('[AnalysisTracker] recordDeckAnalysis failed:', error);
+    }
   }
 
   /**
@@ -324,6 +346,7 @@ class AnalysisTrackerService {
       newInfo?: string[];
     }
   ): Promise<void> {
+    try {
     const previousAnalysis = await this.getLatestAnalysis(startupId);
 
     if (!previousAnalysis) {
@@ -372,6 +395,10 @@ class AnalysisTrackerService {
         overallConfidence: updatedAnalysis.confidenceLevel / 100,
       },
     });
+    } catch (error) {
+      // Table might not exist yet - log but don't crash
+      console.warn('[AnalysisTracker] recordEmailAnalysis failed:', error);
+    }
   }
 
   /**

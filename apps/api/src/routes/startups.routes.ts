@@ -801,10 +801,31 @@ startupsRouter.get(
       const startupId = getParamString(req.params, 'id');
 
       // Get all analysis events
-      const events = await prisma.analysisEvent.findMany({
-        where: { startupId },
-        orderBy: { createdAt: 'asc' },
-      });
+      // Handle gracefully if table doesn't exist yet (migration pending)
+      let events: Array<{
+        id: string;
+        sourceType: string;
+        sourceName: string | null;
+        inputSummary: string | null;
+        newInsights: unknown;
+        updatedInsights: unknown;
+        confirmedInsights: unknown;
+        concerns: unknown;
+        questions: unknown;
+        overallConfidence: number | null;
+        cumulativeAnalysis: unknown;
+        createdAt: Date;
+      }> = [];
+
+      try {
+        events = await prisma.analysisEvent.findMany({
+          where: { startupId },
+          orderBy: { createdAt: 'asc' },
+        });
+      } catch (dbError) {
+        // Table might not exist yet - return empty timeline
+        console.warn('[AnalysisTimeline] Query failed, table may not exist:', dbError);
+      }
 
       // Get the latest cumulative analysis
       const latestEvent = events[events.length - 1];
