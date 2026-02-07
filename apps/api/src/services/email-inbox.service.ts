@@ -302,7 +302,20 @@ export class EmailInboxService {
       body?: string;
       from?: string;
       date?: string;
-    }
+    },
+    pitchDeckAnalysis?: {
+      strengths: string[];
+      weaknesses: string[];
+      questions: string[];
+      summary: string;
+      extractedData?: {
+        problem?: string;
+        solution?: string;
+        traction?: Record<string, unknown>;
+        team?: Array<{ name?: string; role?: string }>;
+        askAmount?: string;
+      };
+    } | null
   ): Promise<string> {
     // Map stage string to enum value
     const stageMap: Record<string, string> = {
@@ -327,6 +340,19 @@ export class EmailInboxService {
     if (aiService.enabled) {
       try {
         console.log(`[StartupCreation] Running AI analysis for ${proposal.startupName}...`);
+        console.log(`[StartupCreation] Including pitch deck analysis: ${pitchDeckAnalysis ? 'YES' : 'NO'}`);
+
+        // Build context with email and pitch deck analysis
+        const context: Parameters<typeof aiService.analyzeAndDraftReply>[1] = {};
+
+        if (emailContext) {
+          context.originalEmail = emailContext;
+        }
+
+        if (pitchDeckAnalysis) {
+          context.pitchDeckAnalysis = pitchDeckAnalysis;
+        }
+
         const analysisResult = await aiService.analyzeAndDraftReply(
           {
             name: proposal.startupName,
@@ -338,7 +364,7 @@ export class EmailInboxService {
             stage: proposal.stage,
             extractedData: proposal as unknown as Record<string, unknown>,
           },
-          emailContext ? { originalEmail: emailContext } : undefined
+          Object.keys(context).length > 0 ? context : undefined
         );
 
         businessModelAnalysis = analysisResult.analysis as unknown as Record<string, unknown>;
@@ -701,7 +727,137 @@ export class EmailInboxService {
       throw new Error('Proposal already processed');
     }
 
-    // Create the startup from the queued data with email context
+    // FIRST: Analyze attachments BEFORE creating startup so we can include
+    // the analysis in the draft reply generation
+    const attachments = proposal.attachments as Array<{
+      filename: string;
+      contentType: string;
+      size: number;
+      contentBase64: string;
+    }> | null;
+
+    // Store analyzed deck data for use in draft reply
+    let consolidatedDeckAnalysis: {
+      strengths: string[];
+      weaknesses: string[];
+      questions: string[];
+      summary: string;
+      extractedData?: {
+        problem?: string;
+        solution?: string;
+        traction?: Record<string, unknown>;
+        team?: Array<{ name?: string; role?: string }>;
+        askAmount?: string;
+      };
+    } | null = null;
+
+    const processedDecks: Array<{
+      filename: string;
+      extractedText: string;
+      content: Buffer;
+      analysis?: Awaited<ReturnType<typeof aiService.processDeck>>;
+    }> = [];
+
+    if (attachments && attachments.length > 0 && aiService.enabled) {
+      console.log(`[ProposalApprove] Analyzing ${attachments.length} attachments BEFORE creating startup...`);
+
+      for (const attachment of attachments) {
+        try {
+          const content = Buffer.from(attachment.contentBase64, 'base64');
+          let extractedText = '';
+
+          try {
+            const pdfData = await pdfParse(content);
+            extractedText = pdfData.text;
+            console.log(`[ProposalApprove] Extracted ${extractedText.length} chars from ${attachment.filename}`);
+          } catch (pdfError) {
+            console.error(`[ProposalApprove] Failed to parse PDF ${attachment.filename}:`, pdfError);
+            continue;
+          }
+
+          if (extractedText) {
+            // Analyze the deck synchronously so we can use it for draft reply
+            try {
+              const analysis = await aiService.processDeck(extractedText);
+              processedDecks.push({
+                filename: attachment.filename,
+                extractedText,
+                content,
+                analysis,
+              });
+              console.log(`[ProposalApprove] Analyzed ${attachment.filename}: score ${analysis.analysis.score}`);
+            } catch (analysisError) {
+              console.error(`[ProposalApprove] Failed to analyze ${attachment.filename}:`, analysisError);
+              processedDecks.push({ filename: attachment.filename, extractedText, content });
+            }
+          }
+        } catch (attachmentError) {
+          console.error(`[ProposalApprove] Error processing attachment ${attachment.filename}:`, attachmentError);
+        }
+      }
+
+      // Consolidate all deck analyses
+      if (processedDecks.some(d => d.analysis)) {
+        const allStrengths: string[] = [];
+        const allWeaknesses: string[] = [];
+        const allQuestions: string[] = [];
+        const allSummaries: string[] = [];
+        let mergedExtractedData: NonNullable<typeof consolidatedDeckAnalysis>['extractedData'] = {};
+
+        for (const deck of processedDecks) {
+          if (deck.analysis) {
+            const { analysis, extractedData } = deck.analysis;
+
+            // Collect strengths
+            for (const s of analysis.strengths) {
+              if (!allStrengths.includes(s)) allStrengths.push(s);
+            }
+            // Collect weaknesses
+            for (const w of analysis.weaknesses) {
+              if (!allWeaknesses.includes(w)) allWeaknesses.push(w);
+            }
+            // Collect questions
+            if (analysis.questions) {
+              for (const q of analysis.questions) {
+                if (!allQuestions.includes(q)) allQuestions.push(q);
+              }
+            }
+            // Collect summaries
+            if (analysis.summary) {
+              allSummaries.push(`[${deck.filename}]: ${analysis.summary}`);
+            }
+            // Merge extracted data
+            if (extractedData.problem) mergedExtractedData.problem = extractedData.problem;
+            if (extractedData.solution) mergedExtractedData.solution = extractedData.solution;
+            if (extractedData.askAmount) mergedExtractedData.askAmount = extractedData.askAmount;
+            if (extractedData.traction) {
+              mergedExtractedData.traction = { ...mergedExtractedData.traction, ...extractedData.traction };
+            }
+            if (extractedData.team) {
+              const existingTeam = mergedExtractedData.team || [];
+              for (const member of extractedData.team) {
+                if (!existingTeam.some(m => m.name === member.name)) {
+                  existingTeam.push(member);
+                }
+              }
+              mergedExtractedData.team = existingTeam;
+            }
+          }
+        }
+
+        consolidatedDeckAnalysis = {
+          strengths: allStrengths,
+          weaknesses: allWeaknesses,
+          questions: allQuestions,
+          summary: allSummaries.join('\n\n'),
+          extractedData: Object.keys(mergedExtractedData).length > 0 ? mergedExtractedData : undefined,
+        };
+
+        console.log(`[ProposalApprove] Consolidated deck analysis: ${allStrengths.length} strengths, ${allWeaknesses.length} weaknesses, ${allQuestions.length} questions`);
+      }
+    }
+
+    // Create the startup from the queued data with email context AND deck analysis
     const extractedData = proposal.extractedData as ExtractedStartupProposal | null;
 
     const startupId = await this.createStartupFromProposal(
@@ -727,8 +883,24 @@ export class EmailInboxService {
           ? `${proposal.emailFromName} <${proposal.emailFrom}>`
           : proposal.emailFrom,
         date: proposal.emailDate.toISOString(),
-      }
+      },
+      // Pass the consolidated deck analysis for draft reply
+      consolidatedDeckAnalysis
     );
+
+    // Store the consolidated deck analysis on the startup for future use
+    if (consolidatedDeckAnalysis) {
+      await prisma.startup.update({
+        where: { id: startupId },
+        data: {
+          consolidatedDeckAnalysis: {
+            ...consolidatedDeckAnalysis,
+            lastUpdated: new Date().toISOString(),
+            deckCount: processedDecks.length,
+          } as unknown as object,
+        },
+      });
+    }
 
     // Create an Email record for the original proposal email
     await prisma.email.create({
@@ -750,54 +922,76 @@ export class EmailInboxService {
       },
     });
 
-    // Process any PDF attachments from the email
-    const attachments = proposal.attachments as Array<{
-      filename: string;
-      contentType: string;
-      size: number;
-      contentBase64: string;
-    }> | null;
+    // Save pitch deck records and update with analysis
+    for (const deck of processedDecks) {
+      try {
+        const deckRecord = await prisma.pitchDeck.create({
+          data: {
+            startupId,
+            fileUrl: `email-attachment://${proposal.emailMessageId}/${deck.filename}`,
+            fileName: deck.filename,
+            fileSize: deck.content.length,
+            mimeType: 'application/pdf',
+            extractedText: deck.extractedText,
+            extractedData: deck.analysis?.extractedData as unknown as object || null,
+            aiAnalysis: deck.analysis?.analysis as unknown as object || null,
+            uploadedBy: userId,
+          },
+        });
 
-    if (attachments && attachments.length > 0) {
-      for (const attachment of attachments) {
-        try {
-          // Convert base64 back to buffer
-          const content = Buffer.from(attachment.contentBase64, 'base64');
+        console.log(`[ProposalApprove] Created pitch deck record: ${deckRecord.id} for ${deck.filename}`);
 
-          // Extract text from PDF
-          let extractedText = '';
-          try {
-            const pdfData = await pdfParse(content);
-            extractedText = pdfData.text;
-            console.log(`[ProposalApprove] Extracted ${extractedText.length} chars from ${attachment.filename}`);
-          } catch (pdfError) {
-            console.error(`[ProposalApprove] Failed to parse PDF ${attachment.filename}:`, pdfError);
-          }
+        // Update startup score based on deck analysis
+        if (deck.analysis) {
+          await scoringService.setBaseScore(startupId, deck.analysis.analysis.breakdown);
 
-          // Create pitch deck record
-          const deck = await prisma.pitchDeck.create({
-            data: {
+          // Create score events from deck analysis
+          const events: Array<{
+            startupId: string;
+            source: 'deck';
+            sourceId: string;
+            category: ScoreCategory;
+            signal: string;
+            impact: number;
+            confidence: number;
+            evidence: string;
+            analyzedBy: 'ai';
+          }> = [];
+
+          for (const strength of deck.analysis.analysis.strengths) {
+            events.push({
               startupId,
-              fileUrl: `email-attachment://${proposal.emailMessageId}/${attachment.filename}`,
-              fileName: attachment.filename,
-              fileSize: attachment.size,
-              mimeType: attachment.contentType,
-              extractedText: extractedText || null,
-              uploadedBy: userId,
-            },
-          });
-
-          console.log(`[ProposalApprove] Created pitch deck record: ${deck.id} for ${attachment.filename}`);
-
-          // Process with AI asynchronously if we have text
-          if (extractedText && aiService.enabled) {
-            this.processDeckWithAI(deck.id, startupId, extractedText, userId).catch((error) => {
-              console.error(`[ProposalApprove] Error processing deck ${deck.id} with AI:`, error);
+              source: 'deck' as const,
+              sourceId: deckRecord.id,
+              category: 'momentum' as const,
+              signal: `Strength: ${strength}`,
+              impact: 1,
+              confidence: 0.8,
+              evidence: strength,
+              analyzedBy: 'ai' as const,
             });
           }
-        } catch (attachmentError) {
-          console.error(`[ProposalApprove] Error processing attachment ${attachment.filename}:`, attachmentError);
+
+          for (const weakness of deck.analysis.analysis.weaknesses) {
+            events.push({
+              startupId,
+              source: 'deck' as const,
+              sourceId: deckRecord.id,
+              category: 'red_flag' as const,
+              signal: `Weakness: ${weakness}`,
+              impact: -0.5,
+              confidence: 0.8,
+              evidence: weakness,
+              analyzedBy: 'ai' as const,
+            });
+          }
+
+          if (events.length > 0) {
+            await scoringService.addScoreEvents(events);
+          }
         }
+      } catch (deckError) {
+        console.error(`[ProposalApprove] Error saving deck ${deck.filename}:`, deckError);
       }
     }
 
@@ -822,6 +1016,8 @@ export class EmailInboxService {
         details: JSON.stringify({
           proposalId,
           emailSubject: proposal.emailSubject,
+          decksAnalyzed: processedDecks.length,
+          hasConsolidatedAnalysis: !!consolidatedDeckAnalysis,
         }),
       },
     });
