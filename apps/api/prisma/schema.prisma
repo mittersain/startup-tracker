@@ -102,10 +102,11 @@ model Startup {
   scoreUpdatedAt   DateTime? @map("score_updated_at")
 
   // Business model analysis
-  businessModelAnalysis Json?   @map("business_model_analysis") // AI-generated analysis
-  draftReply            String? @map("draft_reply") // Draft email reply for founder
-  draftReplyStatus      String  @default("pending") @map("draft_reply_status") // pending, approved, sent
-  analysisUpdatedAt     DateTime? @map("analysis_updated_at")
+  businessModelAnalysis    Json?   @map("business_model_analysis") // AI-generated analysis
+  consolidatedDeckAnalysis Json?   @map("consolidated_deck_analysis") // Merged analysis from all pitch decks
+  draftReply               String? @map("draft_reply") // Draft email reply for founder
+  draftReplyStatus         String  @default("pending") @map("draft_reply_status") // pending, approved, sent
+  analysisUpdatedAt        DateTime? @map("analysis_updated_at")
 
   // Extracted data
   founders     Json?

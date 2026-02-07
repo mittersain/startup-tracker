@@ -298,13 +298,16 @@ async function processDeckWithAI(
       },
     });
 
-    // Update startup with extracted data
+    // Update startup with extracted data and clear cached consolidated analysis
+    // so it will be rebuilt on next draft reply generation
     await prisma.startup.update({
       where: { id: startupId },
       data: {
         founders: extractedData.team as unknown as object,
         metrics: extractedData.traction as unknown as object,
         description: extractedData.tagline ?? extractedData.solution,
+        // Clear consolidated analysis cache to force rebuild with new deck
+        consolidatedDeckAnalysis: null,
       },
     });
 

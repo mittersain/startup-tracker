@@ -1270,7 +1270,10 @@ export class EmailInboxService {
       });
 
       if (startup) {
-        const updateData: Record<string, unknown> = {};
+        const updateData: Record<string, unknown> = {
+          // Always clear consolidated analysis cache when a new deck is processed
+          consolidatedDeckAnalysis: null,
+        };
         if (!startup.founders && extractedData.team) {
           updateData.founders = extractedData.team as unknown as object;
         }

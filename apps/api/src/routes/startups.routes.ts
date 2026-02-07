@@ -517,7 +517,7 @@ startupsRouter.post(
 
       const startupId = getParamString(req.params, 'id');
 
-      // Get startup with all related data
+      // Get startup with all related data including ALL pitch decks
       const startup = await prisma.startup.findUnique({
         where: { id: startupId },
         include: {
@@ -527,7 +527,7 @@ startupsRouter.post(
           },
           pitchDecks: {
             orderBy: { createdAt: 'desc' },
-            take: 1,
+            // Fetch ALL pitch decks, not just the latest
           },
         },
       });
@@ -625,27 +625,116 @@ startupsRouter.post(
         }));
       }
 
-      // Add pitch deck analysis
-      const latestDeck = startup.pitchDecks[0];
-      if (latestDeck?.aiAnalysis) {
-        const deckAnalysis = latestDeck.aiAnalysis as Record<string, unknown>;
-        const extractedData = latestDeck.extractedData as Record<string, unknown> | null;
+      // Consolidate analysis from ALL pitch decks
+      const allStrengths: string[] = [];
+      const allWeaknesses: string[] = [];
+      const allQuestions: string[] = [];
+      const allSummaries: string[] = [];
+      let consolidatedExtractedData: {
+        problem?: string;
+        solution?: string;
+        traction?: Record<string, unknown>;
+        team?: Array<{ name?: string; role?: string }>;
+        askAmount?: string;
+      } = {};
 
-        context.pitchDeckAnalysis = {
-          strengths: deckAnalysis.strengths as string[] | undefined,
-          weaknesses: deckAnalysis.weaknesses as string[] | undefined,
-          questions: deckAnalysis.questions as string[] | undefined,
-          summary: deckAnalysis.summary as string | undefined,
-          extractedData: extractedData
-            ? {
-                problem: extractedData.problem as string | undefined,
-                solution: extractedData.solution as string | undefined,
-                traction: extractedData.traction as Record<string, unknown> | undefined,
-                team: extractedData.team as Array<{ name?: string; role?: string }> | undefined,
-                askAmount: extractedData.askAmount as string | undefined,
+      // Check if we have cached consolidated analysis
+      const cachedConsolidatedAnalysis = startup.consolidatedDeckAnalysis as {
+        strengths?: string[];
+        weaknesses?: string[];
+        questions?: string[];
+        summary?: string;
+        extractedData?: typeof consolidatedExtractedData;
+        lastUpdated?: string;
+        deckCount?: number;
+      } | null;
+
+      // Only rebuild if deck count changed or no cache exists
+      const needsRebuild = !cachedConsolidatedAnalysis ||
+        cachedConsolidatedAnalysis.deckCount !== startup.pitchDecks.length;
+
+      if (needsRebuild && startup.pitchDecks.length > 0) {
+        // Process ALL pitch decks and merge their analyses
+        for (const deck of startup.pitchDecks) {
+          if (deck.aiAnalysis) {
+            const deckAnalysis = deck.aiAnalysis as Record<string, unknown>;
+            const extractedData = deck.extractedData as Record<string, unknown> | null;
+
+            // Collect strengths (avoid duplicates)
+            if (Array.isArray(deckAnalysis.strengths)) {
+              for (const s of deckAnalysis.strengths as string[]) {
+                if (!allStrengths.includes(s)) allStrengths.push(s);
               }
-            : undefined,
+            }
+
+            // Collect weaknesses (avoid duplicates)
+            if (Array.isArray(deckAnalysis.weaknesses)) {
+              for (const w of deckAnalysis.weaknesses as string[]) {
+                if (!allWeaknesses.includes(w)) allWeaknesses.push(w);
+              }
+            }
+
+            // Collect questions (avoid duplicates)
+            if (Array.isArray(deckAnalysis.questions)) {
+              for (const q of deckAnalysis.questions as string[]) {
+                if (!allQuestions.includes(q)) allQuestions.push(q);
+              }
+            }
+
+            // Collect summaries
+            if (typeof deckAnalysis.summary === 'string') {
+              allSummaries.push(`[${deck.fileName}]: ${deckAnalysis.summary}`);
+            }
+
+            // Merge extracted data (later decks override earlier ones for same fields)
+            if (extractedData) {
+              if (extractedData.problem) consolidatedExtractedData.problem = extractedData.problem as string;
+              if (extractedData.solution) consolidatedExtractedData.solution = extractedData.solution as string;
+              if (extractedData.askAmount) consolidatedExtractedData.askAmount = extractedData.askAmount as string;
+              if (extractedData.traction) {
+                consolidatedExtractedData.traction = {
+                  ...consolidatedExtractedData.traction,
+                  ...(extractedData.traction as Record<string, unknown>),
+                };
+              }
+              if (Array.isArray(extractedData.team)) {
+                const existingTeam = consolidatedExtractedData.team || [];
+                const newTeam = extractedData.team as Array<{ name?: string; role?: string }>;
+                // Merge teams, avoiding duplicates by name
+                for (const member of newTeam) {
+                  if (!existingTeam.some(m => m.name === member.name)) {
+                    existingTeam.push(member);
+                  }
+                }
+                consolidatedExtractedData.team = existingTeam;
+              }
+            }
+          }
+        }
+
+        // Build consolidated analysis
+        const consolidatedAnalysis = {
+          strengths: allStrengths,
+          weaknesses: allWeaknesses,
+          questions: allQuestions,
+          summary: allSummaries.join('\n\n'),
+          extractedData: Object.keys(consolidatedExtractedData).length > 0 ? consolidatedExtractedData : undefined,
+          lastUpdated: new Date().toISOString(),
+          deckCount: startup.pitchDecks.length,
         };
+
+        // Store consolidated analysis on startup for future use
+        await prisma.startup.update({
+          where: { id: startupId },
+          data: {
+            consolidatedDeckAnalysis: consolidatedAnalysis as unknown as object,
+          },
+        });
+
+        context.pitchDeckAnalysis = consolidatedAnalysis;
+      } else if (cachedConsolidatedAnalysis) {
+        // Use cached consolidated analysis
+        context.pitchDeckAnalysis = cachedConsolidatedAnalysis;
       }
 
       // Generate new draft reply with full context
