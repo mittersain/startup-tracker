@@ -2280,9 +2280,23 @@ export default function StartupDetailPage() {
                     </button>
                     <div className="flex items-center gap-3">
                       {deck.aiAnalysis?.score !== undefined ? (
-                        <div className="text-right">
-                          <span className="text-lg font-bold text-primary-600">{deck.aiAnalysis.score}</span>
-                          <span className="text-sm text-gray-500">/100</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setAnalyzingDeckId(deck.id);
+                              setAnalyzingDeckName(deck.fileName);
+                              reprocessDeckMutation.mutate(deck.id);
+                            }}
+                            disabled={reprocessDeckMutation.isPending || analyzingDeckId !== null}
+                            className="text-xs px-2 py-1 text-gray-500 hover:text-primary-600 hover:bg-primary-50 rounded transition-colors disabled:opacity-50"
+                            title="Re-analyze this document"
+                          >
+                            <RefreshCw className="w-4 h-4" />
+                          </button>
+                          <div className="text-right">
+                            <span className="text-lg font-bold text-primary-600">{deck.aiAnalysis.score}</span>
+                            <span className="text-sm text-gray-500">/100</span>
+                          </div>
                         </div>
                       ) : analyzingDeckId === deck.id ? (
                         <div className="flex items-center gap-2 text-primary-600">
