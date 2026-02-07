@@ -9,6 +9,7 @@ import {
 import { aiService } from './ai.service.js';
 import { scoringService } from './scoring.service.js';
 import { emailService } from './email.service.js';
+import { analysisTrackerService } from './analysis-tracker.service.js';
 import prisma from '../utils/prisma.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ScoreCategory } from '@startup-tracker/shared';
@@ -900,6 +901,40 @@ export class EmailInboxService {
           } as unknown as object,
         },
       });
+    }
+
+    // Record initial analysis event for the analysis timeline
+    try {
+      await analysisTrackerService.createInitialAnalysis(
+        startupId,
+        {
+          name: proposal.startupName,
+          description: proposal.description,
+          website: proposal.website,
+          founderName: proposal.founderName,
+          stage: proposal.stage,
+          askAmount: proposal.askAmount,
+        },
+        {
+          subject: proposal.emailSubject,
+          body: proposal.emailPreview,
+          from: proposal.emailFromName
+            ? `${proposal.emailFromName} <${proposal.emailFrom}>`
+            : proposal.emailFrom,
+        },
+        consolidatedDeckAnalysis ? {
+          extractedData: consolidatedDeckAnalysis.extractedData || {},
+          analysis: {
+            strengths: consolidatedDeckAnalysis.strengths,
+            weaknesses: consolidatedDeckAnalysis.weaknesses,
+            questions: consolidatedDeckAnalysis.questions,
+            summary: consolidatedDeckAnalysis.summary,
+          },
+        } : undefined
+      );
+      console.log(`[ProposalApprove] Created initial analysis event for ${proposal.startupName}`);
+    } catch (analysisError) {
+      console.error('[ProposalApprove] Failed to create initial analysis event:', analysisError);
     }
 
     // Create an Email record for the original proposal email

@@ -789,3 +789,46 @@ startupsRouter.post(
     }
   }
 );
+
+// Get analysis timeline for a startup
+startupsRouter.get(
+  '/:id/analysis-timeline',
+  [param('id').isUUID()],
+  validate,
+  checkStartupAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const startupId = getParamString(req.params, 'id');
+
+      // Get all analysis events
+      const events = await prisma.analysisEvent.findMany({
+        where: { startupId },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      // Get the latest cumulative analysis
+      const latestEvent = events[events.length - 1];
+      const cumulativeAnalysis = latestEvent?.cumulativeAnalysis || null;
+
+      res.json({
+        timeline: events.map(event => ({
+          id: event.id,
+          sourceType: event.sourceType,
+          sourceName: event.sourceName,
+          inputSummary: event.inputSummary,
+          newInsights: event.newInsights,
+          updatedInsights: event.updatedInsights,
+          confirmedInsights: event.confirmedInsights,
+          concerns: event.concerns,
+          questions: event.questions,
+          overallConfidence: event.overallConfidence,
+          createdAt: event.createdAt,
+        })),
+        cumulativeAnalysis,
+        totalEvents: events.length,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);

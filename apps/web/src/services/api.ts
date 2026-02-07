@@ -158,6 +158,11 @@ export const startupsApi = {
     const response = await api.post(`/startups/${id}/regenerate-reply`);
     return response.data;
   },
+
+  getAnalysisTimeline: async (id: string) => {
+    const response = await api.get(`/startups/${id}/analysis-timeline`);
+    return response.data;
+  },
 };
 
 // Decks API

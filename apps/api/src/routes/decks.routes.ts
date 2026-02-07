@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import prisma from '../utils/prisma.js';
 import { aiService } from '../services/ai.service.js';
 import { scoringService } from '../services/scoring.service.js';
+import { analysisTrackerService } from '../services/analysis-tracker.service.js';
 import { authenticate, checkStartupAccess, requirePermission } from '../middleware/auth.js';
 import { AppError } from '../middleware/error-handler.js';
 import type { Request, Response, NextFunction } from 'express';
@@ -380,6 +381,24 @@ async function processDeckWithAI(
           },
         },
       });
+    }
+
+    // Record analysis event for the analysis timeline
+    const deck = await prisma.pitchDeck.findUnique({
+      where: { id: deckId },
+      select: { fileName: true },
+    });
+
+    try {
+      await analysisTrackerService.recordDeckAnalysis(
+        startupId,
+        deckId,
+        deck?.fileName || 'Unknown',
+        { extractedData, analysis }
+      );
+      console.log(`[AnalysisTracker] Recorded deck analysis event for ${deck?.fileName}`);
+    } catch (trackingError) {
+      console.error('[AnalysisTracker] Failed to record deck analysis:', trackingError);
     }
 
     console.log(`Deck ${deckId} processed successfully. Score: ${analysis.score}`);

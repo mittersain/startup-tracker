@@ -132,12 +132,49 @@ model Startup {
   activityLogs           ActivityLog[]
   scoreAlerts            ScoreAlert[]
   evaluation             StartupEvaluation?
+  analysisEvents         AnalysisEvent[]
 
   @@index([organizationId])
   @@index([ownerId])
   @@index([status])
   @@index([currentScore])
   @@map("startups")
+}
+
+// ==========================================
+// Analysis Tracker
+// ==========================================
+
+model AnalysisEvent {
+  id          String   @id @default(uuid())
+  startupId   String   @map("startup_id")
+  sourceType  String   @map("source_type") // "email", "deck", "manual", "initial"
+  sourceId    String?  @map("source_id") // ID of the email or deck that triggered this
+  sourceName  String?  @map("source_name") // Filename or email subject
+
+  // What was analyzed
+  inputSummary String? @map("input_summary") // Brief summary of the input
+
+  // Analysis results
+  newInsights     Json?   @map("new_insights") // New things learned
+  updatedInsights Json?   @map("updated_insights") // Things that changed from previous
+  confirmedInsights Json? @map("confirmed_insights") // Things that were confirmed
+  concerns        Json?   // New or updated concerns
+  questions       Json?   // Questions for the founder
+
+  // Cumulative state after this analysis
+  cumulativeAnalysis Json? @map("cumulative_analysis") // Full analysis state at this point
+
+  // Confidence tracking
+  overallConfidence Float? @map("overall_confidence") // 0-1 confidence in our understanding
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  startup Startup @relation(fields: [startupId], references: [id], onDelete: Cascade)
+
+  @@index([startupId])
+  @@index([createdAt])
+  @@map("analysis_events")
 }
 
 model StartupAssignment {

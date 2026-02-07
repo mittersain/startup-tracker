@@ -31,6 +31,9 @@ import {
   Pencil,
   Save,
   RefreshCw,
+  GitBranch,
+  Plus,
+  Sparkles,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -89,7 +92,7 @@ export default function StartupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'deck' | 'emails' | 'events'>('analysis');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'analysis' | 'deck' | 'emails' | 'events'>('timeline');
   const [copiedReply, setCopiedReply] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isEditingReply, setIsEditingReply] = useState(false);
@@ -122,6 +125,12 @@ export default function StartupDetailPage() {
   const { data: commMetrics } = useQuery({
     queryKey: ['startup-comm-metrics', id],
     queryFn: () => emailsApi.getMetrics(id!),
+    enabled: !!id,
+  });
+
+  const { data: analysisTimeline } = useQuery({
+    queryKey: ['startup-analysis-timeline', id],
+    queryFn: () => startupsApi.getAnalysisTimeline(id!),
     enabled: !!id,
   });
 
@@ -422,6 +431,7 @@ export default function StartupDetailPage() {
         <nav className="flex gap-8">
           {[
             { id: 'overview', label: 'Overview', icon: BarChart3 },
+            { id: 'timeline', label: 'Analysis Timeline', icon: GitBranch },
             { id: 'analysis', label: 'Analysis & Reply', icon: Brain },
             { id: 'deck', label: 'Documents', icon: FileText },
             { id: 'emails', label: 'Emails', icon: Mail },
@@ -550,6 +560,212 @@ export default function StartupDetailPage() {
               </div>
             ) : (
               <p className="text-gray-500">No score events yet.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'timeline' && (
+        <div className="space-y-6">
+          {/* Cumulative Understanding Card */}
+          {analysisTimeline?.cumulativeAnalysis && (
+            <div className="card p-6 bg-gradient-to-br from-primary-50 to-white border-primary-200">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-primary-600" />
+                  <h3 className="font-semibold text-gray-900">Current Understanding</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500">Confidence:</span>
+                  <div className="flex items-center gap-1">
+                    <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-primary-500 rounded-full"
+                        style={{ width: `${analysisTimeline.cumulativeAnalysis.confidenceLevel || 0}%` }}
+                      />
+                    </div>
+                    <span className="text-sm font-medium text-primary-600">
+                      {analysisTimeline.cumulativeAnalysis.confidenceLevel || 0}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Problem & Solution */}
+                {(analysisTimeline.cumulativeAnalysis.problem || analysisTimeline.cumulativeAnalysis.solution) && (
+                  <div className="space-y-2">
+                    {analysisTimeline.cumulativeAnalysis.problem && (
+                      <div>
+                        <span className="text-xs font-medium text-gray-500">Problem:</span>
+                        <p className="text-sm text-gray-700">{analysisTimeline.cumulativeAnalysis.problem}</p>
+                      </div>
+                    )}
+                    {analysisTimeline.cumulativeAnalysis.solution && (
+                      <div>
+                        <span className="text-xs font-medium text-gray-500">Solution:</span>
+                        <p className="text-sm text-gray-700">{analysisTimeline.cumulativeAnalysis.solution}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Key Strengths */}
+                {analysisTimeline.cumulativeAnalysis.strengths?.length > 0 && (
+                  <div>
+                    <span className="text-xs font-medium text-gray-500">Key Strengths:</span>
+                    <ul className="mt-1 space-y-1">
+                      {analysisTimeline.cumulativeAnalysis.strengths.slice(0, 3).map((s: string, i: number) => (
+                        <li key={i} className="flex items-start gap-1 text-sm text-gray-700">
+                          <CheckCircle className="w-3 h-3 text-success-500 mt-1 flex-shrink-0" />
+                          <span>{s}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              {/* Open Questions */}
+              {analysisTimeline.cumulativeAnalysis.unansweredQuestions?.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-primary-100">
+                  <span className="text-xs font-medium text-gray-500">Open Questions ({analysisTimeline.cumulativeAnalysis.unansweredQuestions.length}):</span>
+                  <ul className="mt-1 space-y-1">
+                    {analysisTimeline.cumulativeAnalysis.unansweredQuestions.slice(0, 3).map((q: string, i: number) => (
+                      <li key={i} className="flex items-start gap-1 text-sm text-gray-700">
+                        <HelpCircle className="w-3 h-3 text-warning-500 mt-1 flex-shrink-0" />
+                        <span>{q}</span>
+                      </li>
+                    ))}
+                    {analysisTimeline.cumulativeAnalysis.unansweredQuestions.length > 3 && (
+                      <li className="text-xs text-gray-500 pl-4">
+                        +{analysisTimeline.cumulativeAnalysis.unansweredQuestions.length - 3} more questions
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Timeline */}
+          <div className="card p-6">
+            <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <GitBranch className="w-5 h-5 text-primary-600" />
+              Analysis Timeline
+            </h3>
+
+            {analysisTimeline?.timeline?.length > 0 ? (
+              <div className="relative">
+                {/* Timeline line */}
+                <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200" />
+
+                <div className="space-y-6">
+                  {analysisTimeline.timeline.map((event: {
+                    id: string;
+                    sourceType: string;
+                    sourceName: string | null;
+                    inputSummary: string | null;
+                    newInsights: string[] | null;
+                    concerns: string[] | null;
+                    questions: string[] | null;
+                    overallConfidence: number | null;
+                    createdAt: string;
+                  }, index: number) => (
+                    <div key={event.id} className="relative pl-10">
+                      {/* Timeline dot */}
+                      <div className={clsx(
+                        'absolute left-2 w-5 h-5 rounded-full border-2 border-white shadow flex items-center justify-center',
+                        event.sourceType === 'initial' ? 'bg-primary-500' :
+                        event.sourceType === 'deck' ? 'bg-success-500' :
+                        event.sourceType === 'email' ? 'bg-blue-500' :
+                        'bg-gray-400'
+                      )}>
+                        {event.sourceType === 'initial' && <Plus className="w-3 h-3 text-white" />}
+                        {event.sourceType === 'deck' && <FileText className="w-3 h-3 text-white" />}
+                        {event.sourceType === 'email' && <Mail className="w-3 h-3 text-white" />}
+                      </div>
+
+                      <div className="bg-gray-50 rounded-lg p-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <div>
+                            <span className={clsx(
+                              'inline-block px-2 py-0.5 text-xs font-medium rounded',
+                              event.sourceType === 'initial' ? 'bg-primary-100 text-primary-700' :
+                              event.sourceType === 'deck' ? 'bg-success-100 text-success-700' :
+                              event.sourceType === 'email' ? 'bg-blue-100 text-blue-700' :
+                              'bg-gray-100 text-gray-700'
+                            )}>
+                              {event.sourceType === 'initial' ? 'Initial' :
+                               event.sourceType === 'deck' ? 'Pitch Deck' :
+                               event.sourceType === 'email' ? 'Email' :
+                               event.sourceType}
+                            </span>
+                            {event.sourceName && (
+                              <span className="ml-2 text-sm text-gray-600">{event.sourceName}</span>
+                            )}
+                          </div>
+                          <span className="text-xs text-gray-500">
+                            {format(new Date(event.createdAt), 'MMM d, yyyy h:mm a')}
+                          </span>
+                        </div>
+
+                        {event.inputSummary && (
+                          <p className="text-sm text-gray-700 mb-3">{event.inputSummary}</p>
+                        )}
+
+                        {/* New Insights */}
+                        {event.newInsights && event.newInsights.length > 0 && (
+                          <div className="mb-2">
+                            <span className="text-xs font-medium text-success-700">New Insights:</span>
+                            <ul className="mt-1 space-y-1">
+                              {(event.newInsights as string[]).slice(0, 3).map((insight, i) => (
+                                <li key={i} className="flex items-start gap-1 text-sm text-gray-600">
+                                  <Lightbulb className="w-3 h-3 text-success-500 mt-1 flex-shrink-0" />
+                                  <span>{insight}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Concerns */}
+                        {event.concerns && (event.concerns as string[]).length > 0 && (
+                          <div className="mb-2">
+                            <span className="text-xs font-medium text-warning-700">Concerns:</span>
+                            <ul className="mt-1 space-y-1">
+                              {(event.concerns as string[]).slice(0, 2).map((concern, i) => (
+                                <li key={i} className="flex items-start gap-1 text-sm text-gray-600">
+                                  <AlertTriangle className="w-3 h-3 text-warning-500 mt-1 flex-shrink-0" />
+                                  <span>{concern}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Confidence change indicator */}
+                        {event.overallConfidence !== null && index > 0 && (
+                          <div className="flex items-center gap-1 text-xs text-gray-500 mt-2">
+                            <span>Confidence:</span>
+                            <span className="font-medium text-primary-600">
+                              {Math.round(event.overallConfidence * 100)}%
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <GitBranch className="w-10 h-10 mx-auto text-gray-400 mb-3" />
+                <p className="text-gray-500">No analysis events yet.</p>
+                <p className="text-sm text-gray-400 mt-1">
+                  Analysis events are recorded as emails and documents are processed.
+                </p>
+              </div>
             )}
           </div>
         </div>
