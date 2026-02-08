@@ -21,7 +21,6 @@ import {
   Loader2,
   Brain,
   Send,
-  Copy,
   Building2,
   Target,
   Users,
@@ -30,8 +29,6 @@ import {
   X,
   ArrowUpRight,
   ArrowDownLeft,
-  Pencil,
-  Save,
   RefreshCw,
   PauseCircle,
   XCircle,
@@ -107,10 +104,7 @@ export default function StartupDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'research' | 'deck' | 'emails' | 'events' | 'comments'>('analysis');
-  const [copiedReply, setCopiedReply] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
-  const [isEditingReply, setIsEditingReply] = useState(false);
-  const [editedReply, setEditedReply] = useState('');
   const [isComposingEmail, setIsComposingEmail] = useState(false);
   const [composeSubject, setComposeSubject] = useState('');
   const [composeBody, setComposeBody] = useState('');
@@ -280,41 +274,6 @@ export default function StartupDetailPage() {
     },
   });
 
-  const sendReplyMutation = useMutation({
-    mutationFn: () => startupsApi.sendDraftReply(id!),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['startup', id] });
-      toast.success(`Email sent to ${data.to}`);
-    },
-    onError: (error: Error & { response?: { data?: { message?: string } } }) => {
-      const message = error.response?.data?.message || 'Failed to send email';
-      toast.error(message);
-    },
-  });
-
-  const updateReplyMutation = useMutation({
-    mutationFn: (draftReply: string) => startupsApi.updateDraftReply(id!, draftReply),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['startup', id] });
-      setIsEditingReply(false);
-      toast.success('Draft reply updated');
-    },
-    onError: () => {
-      toast.error('Failed to update draft reply');
-    },
-  });
-
-  const resetDraftStatusMutation = useMutation({
-    mutationFn: () => startupsApi.resetDraftReplyStatus(id!),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['startup', id] });
-      toast.success('Draft status reset - you can send again');
-    },
-    onError: () => {
-      toast.error('Failed to reset draft status');
-    },
-  });
-
   const uploadMutation = useMutation({
     mutationFn: (file: File) => decksApi.upload(id!, file),
     onSuccess: () => {
@@ -388,25 +347,7 @@ export default function StartupDetailPage() {
     },
   });
 
-  // Analyze email mutation - re-analyzes founder response with AI
-  const analyzeEmailMutation = useMutation({
-    mutationFn: (emailId: string) => emailsApi.analyze(emailId),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['startup', id] });
-      queryClient.invalidateQueries({ queryKey: ['emails', id] });
-      queryClient.invalidateQueries({ queryKey: ['startup-events', id] });
-      if (data.analysis?.recommendation) {
-        toast.success(`Analysis complete - AI recommends: ${data.analysis.recommendation.replace('_', ' ')}`);
-      } else {
-        toast.success('Email analyzed successfully');
-      }
-    },
-    onError: () => {
-      toast.error('Failed to analyze email');
-    },
-  });
-
-  // Generate AI reply mutation
+  // Generate AI reply mutation (also analyzes the email)
   const [replyRecommendation, setReplyRecommendation] = useState<{
     recommendation: 'continue' | 'pass' | 'schedule_call';
     recommendationReason: string;
@@ -589,15 +530,6 @@ export default function StartupDetailPage() {
   const breakdown = startup.scoreBreakdown as ScoreBreakdown | undefined;
   const latestDeck = decks?.[0];
   const businessAnalysis = startup.businessModelAnalysis as BusinessModelAnalysis | undefined;
-
-  const copyDraftReply = () => {
-    if (startup.draftReply) {
-      navigator.clipboard.writeText(startup.draftReply);
-      setCopiedReply(true);
-      toast.success('Draft reply copied to clipboard');
-      setTimeout(() => setCopiedReply(false), 2000);
-    }
-  };
 
   // Sector display helpers
   const sectorLabels: Record<string, string> = {
@@ -1144,117 +1076,6 @@ export default function StartupDetailPage() {
               <p className="text-sm text-gray-500 mt-1">Analysis is automatically generated when startups are added from email proposals.</p>
             </div>
           )}
-
-          {/* Draft Reply Section */}
-          <div className="card p-5">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Send className="w-5 h-5 text-primary-600" />
-                <h3 className="font-semibold text-gray-900">Draft Reply to Founder</h3>
-              </div>
-              {startup.draftReply && !isEditingReply && (
-                <div className="flex items-center gap-2">
-                  <span className={clsx(
-                    'badge text-xs',
-                    startup.draftReplyStatus === 'sent' ? 'bg-success-100 text-success-700' :
-                    startup.draftReplyStatus === 'approved' ? 'bg-primary-100 text-primary-700' :
-                    'bg-warning-100 text-warning-700'
-                  )}>
-                    {startup.draftReplyStatus === 'sent' ? 'Sent' :
-                     startup.draftReplyStatus === 'approved' ? 'Approved' : 'Pending Review'}
-                  </span>
-                  {startup.draftReplyStatus !== 'sent' && (
-                    <button
-                      onClick={() => {
-                        setEditedReply(startup.draftReply || '');
-                        setIsEditingReply(true);
-                      }}
-                      className="btn btn-secondary btn-sm flex items-center gap-1"
-                    >
-                      <Pencil className="w-4 h-4" />
-                      Edit
-                    </button>
-                  )}
-                  <button
-                    onClick={copyDraftReply}
-                    className="btn btn-secondary btn-sm flex items-center gap-1"
-                  >
-                    <Copy className="w-4 h-4" />
-                    {copiedReply ? 'Copied!' : 'Copy'}
-                  </button>
-                  {startup.draftReplyStatus !== 'sent' ? (
-                    <button
-                      onClick={() => sendReplyMutation.mutate()}
-                      disabled={sendReplyMutation.isPending}
-                      className="btn btn-primary btn-sm flex items-center gap-1"
-                    >
-                      {sendReplyMutation.isPending ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Send className="w-4 h-4" />
-                      )}
-                      {sendReplyMutation.isPending ? 'Sending...' : 'Send Email'}
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => resetDraftStatusMutation.mutate()}
-                      disabled={resetDraftStatusMutation.isPending}
-                      className="btn btn-secondary btn-sm flex items-center gap-1"
-                    >
-                      {resetDraftStatusMutation.isPending ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4" />
-                      )}
-                      {resetDraftStatusMutation.isPending ? 'Resetting...' : 'Reset to Draft'}
-                    </button>
-                  )}
-                </div>
-              )}
-              {isEditingReply && (
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setIsEditingReply(false)}
-                    className="btn btn-secondary btn-sm"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => updateReplyMutation.mutate(editedReply)}
-                    disabled={updateReplyMutation.isPending}
-                    className="btn btn-primary btn-sm flex items-center gap-1"
-                  >
-                    {updateReplyMutation.isPending ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Save className="w-4 h-4" />
-                    )}
-                    {updateReplyMutation.isPending ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {startup.draftReply || isEditingReply ? (
-              isEditingReply ? (
-                <textarea
-                  value={editedReply}
-                  onChange={(e) => setEditedReply(e.target.value)}
-                  className="w-full h-64 p-4 font-mono text-sm text-gray-700 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-y"
-                  placeholder="Write your reply here..."
-                />
-              ) : (
-                <div className="bg-gray-50 rounded-lg p-4 font-mono text-sm text-gray-700 whitespace-pre-wrap">
-                  {startup.draftReply}
-                </div>
-              )
-            ) : (
-              <div className="text-center py-8">
-                <Mail className="w-10 h-10 mx-auto text-gray-400 mb-3" />
-                <p className="text-gray-500">No draft reply generated.</p>
-              </div>
-            )}
-          </div>
 
           {/* Snooze / Pass Decision Section */}
           <div className="card p-5">
@@ -2500,41 +2321,28 @@ export default function StartupDetailPage() {
                           </p>
                         </div>
                         {email.direction === 'inbound' && (
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                analyzeEmailMutation.mutate(email.id);
-                              }}
-                              disabled={analyzeEmailMutation.isPending}
-                              className="btn btn-ghost btn-sm flex items-center gap-1 text-purple-600 hover:bg-purple-50"
-                              title="Analyze this email with AI"
-                            >
-                              {analyzeEmailMutation.isPending ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Brain className="w-3 h-3" />
-                              )}
-                              Analyze
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setIsComposingEmail(true);
-                                setReplyToEmail(email);
-                                setComposeSubject(`Re: ${email.subject}`);
-                                setComposeBody('');
-                                setReplyRecommendation(null);
-                                // Trigger AI to generate reply draft
-                                generateReplyMutation.mutate(email.id);
-                              }}
-                              className="btn btn-secondary btn-sm flex items-center gap-1"
-                              title="Reply to this email with AI assistance"
-                            >
-                              <Send className="w-3 h-3" />
-                              Reply
-                            </button>
-                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsComposingEmail(true);
+                              setReplyToEmail(email);
+                              setComposeSubject(`Re: ${email.subject}`);
+                              setComposeBody('');
+                              setReplyRecommendation(null);
+                              // Trigger AI to analyze and generate reply draft
+                              generateReplyMutation.mutate(email.id);
+                            }}
+                            disabled={generateReplyMutation.isPending}
+                            className="btn btn-primary btn-sm flex items-center gap-1"
+                            title="Analyze email and generate AI reply"
+                          >
+                            {generateReplyMutation.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Brain className="w-3 h-3" />
+                            )}
+                            Analyze & Reply
+                          </button>
                         )}
                       </div>
                     </div>
@@ -2631,39 +2439,28 @@ export default function StartupDetailPage() {
                 {/* Modal Footer */}
                 <div className="flex justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
                   {selectedEmail.direction === 'inbound' && (
-                    <>
-                      <button
-                        onClick={() => {
-                          analyzeEmailMutation.mutate(selectedEmail.id);
-                        }}
-                        disabled={analyzeEmailMutation.isPending}
-                        className="btn btn-ghost flex items-center gap-2 text-purple-600 hover:bg-purple-50"
-                      >
-                        {analyzeEmailMutation.isPending ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Brain className="w-4 h-4" />
-                        )}
-                        Analyze with AI
-                      </button>
-                      <button
-                        onClick={() => {
-                          const emailToReply = selectedEmail;
-                          setSelectedEmail(null);
-                          setIsComposingEmail(true);
-                          setReplyToEmail(emailToReply);
-                          setComposeSubject(`Re: ${emailToReply.subject}`);
-                          setComposeBody('');
-                          setReplyRecommendation(null);
-                          // Trigger AI to generate reply draft
-                          generateReplyMutation.mutate(emailToReply.id);
-                        }}
-                        className="btn btn-primary flex items-center gap-2"
-                      >
-                        <Send className="w-4 h-4" />
-                        Reply
-                      </button>
-                    </>
+                    <button
+                      onClick={() => {
+                        const emailToReply = selectedEmail;
+                        setSelectedEmail(null);
+                        setIsComposingEmail(true);
+                        setReplyToEmail(emailToReply);
+                        setComposeSubject(`Re: ${emailToReply.subject}`);
+                        setComposeBody('');
+                        setReplyRecommendation(null);
+                        // Trigger AI to analyze and generate reply draft
+                        generateReplyMutation.mutate(emailToReply.id);
+                      }}
+                      disabled={generateReplyMutation.isPending}
+                      className="btn btn-primary flex items-center gap-2"
+                    >
+                      {generateReplyMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Brain className="w-4 h-4" />
+                      )}
+                      Analyze & Reply
+                    </button>
                   )}
                   <button
                     onClick={() => setSelectedEmail(null)}

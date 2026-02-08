@@ -226,7 +226,8 @@ async function analyzeFounderResponse(
     body: string;
     from: string;
   },
-  previousEmails: Array<{ subject: string; body: string; direction: string; date: Date }>
+  previousEmails: Array<{ subject: string; body: string; direction: string; date: Date }>,
+  attachmentContext?: string
 ): Promise<{
   responseQuality: {
     score: number; // 1-10
@@ -257,24 +258,23 @@ async function analyzeFounderResponse(
       .map(e => `[${e.direction === 'inbound' ? 'Founder' : 'You'}]: ${e.subject}\n${e.body.substring(0, 500)}`)
       .join('\n\n---\n\n');
 
-    const prompt = `You are helping an individual angel investor evaluate a founder's email response. Be practical and direct.
+    const prompt = `You are helping an individual angel investor draft a reply to a founder's email.
+${attachmentContext ? `
+########## INVESTOR'S COMPLETE ANALYSIS OF THIS STARTUP ##########
+${attachmentContext}
+########## END OF ANALYSIS ##########
 
-STARTUP CONTEXT:
-- Name: ${startupData.name}
-- Stage: ${startupData.stage || 'Unknown'}
-- Description: ${startupData.description || 'Not provided'}
-- Current Score: ${startupData.currentScore || 'Not scored yet'}/100
-- Founder: ${startupData.founderName || 'Unknown'}
-
+IMPORTANT: The investor has ALREADY analyzed all pitch decks and documents. Use the analysis above to inform your reply. Reference specific details from the deck analysis (score, strengths, weaknesses) in your response.
+` : ''}
 PREVIOUS CONVERSATION:
 ${conversationHistory || 'No previous emails'}
 
-NEW FOUNDER RESPONSE:
+NEW EMAIL FROM FOUNDER:
 Subject: ${responseEmail.subject}
 From: ${responseEmail.from}
 Body: ${responseEmail.body}
 
-Analyze the founder's response and provide your assessment. Return ONLY a JSON object:
+Analyze and respond. Return ONLY a JSON object:
 
 {
   "responseQuality": {
@@ -307,14 +307,14 @@ RECOMMENDATION RULES (IMPORTANT):
 CRITICAL - draftReply MUST contain your questions in a NUMBERED LIST:
 - The draftReply field IS the email that will be sent to the founder
 - Format questions as a numbered list (1. 2. 3.) - NOT embedded in prose
-- Include a brief intro line, then list ALL follow-up questions clearly
-- Example format:
-  "Thanks for the details.
+- If pitch deck analysis is provided above, START by acknowledging something specific from the deck (a metric, strength, or concern)
+- Then list follow-up questions that dig deeper into areas identified in the deck analysis
+- Example format (when pitch deck was analyzed):
+  "Looked through the deck - the 40% MoM growth is solid. A few questions:
 
-  A few questions:
-  1. What's your current MRR and growth rate?
-  2. Is the team full-time?
-  3. How do you plan to use the funds?
+  1. How are you thinking about unit economics as you scale?
+  2. What's the CAC/LTV ratio currently?
+  3. Team seems lean - any key hires planned?
 
   - Nitish"
 
@@ -328,20 +328,135 @@ TONE GUIDELINES for draftReply:
 - Use "I" not "we" - this is a personal investor
 - Sign off simply: "- Nitish" or just "Nitish"`;
 
+    // Log whether attachment context is being passed
+    console.log(`[AI Response Analysis] Has attachment context: ${!!attachmentContext}, length: ${attachmentContext?.length || 0}`);
+    if (attachmentContext) {
+      console.log(`[AI Response Analysis] Attachment context preview: ${attachmentContext.substring(0, 200)}...`);
+    }
+
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const text = response.text();
 
+    // Log the AI's draft reply to see if it references attachments
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.log('[AI Response Analysis] No JSON found in response');
       return null;
     }
 
-    return JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(jsonMatch[0]);
+    console.log(`[AI Response Analysis] Draft reply preview: ${parsed.draftReply?.substring(0, 200)}...`);
+
+    return parsed;
   } catch (error) {
     console.error('[AI Response Analysis] Error:', error);
     return null;
+  }
+}
+
+// Update the startup's persistent AI summary
+// This consolidates all analysis (deck, emails, research) into one summary
+async function updateStartupAISummary(startupId: string): Promise<void> {
+  try {
+    console.log(`[AI Summary] Updating summary for startup: ${startupId}`);
+
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      console.log(`[AI Summary] Startup not found: ${startupId}`);
+      return;
+    }
+
+    const startupData = startupDoc.data()!;
+
+    // Fetch all analyzed decks
+    const decksSnapshot = await db.collection('decks')
+      .where('startupId', '==', startupId)
+      .get();
+
+    const deckAnalyses: string[] = [];
+    let latestDeckScore = 0;
+
+    decksSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.aiAnalysis) {
+        const analysis = data.aiAnalysis;
+        latestDeckScore = analysis.score || latestDeckScore;
+        deckAnalyses.push(`
+DECK: ${data.fileName} (Score: ${analysis.score}/100)
+Summary: ${analysis.summary || 'N/A'}
+Strengths: ${(analysis.strengths || []).join('; ')}
+Weaknesses: ${(analysis.weaknesses || []).join('; ')}
+Recommendation: ${analysis.recommendation || 'N/A'}
+${analysis.keyMetrics ? `Key Metrics: TAM=${analysis.keyMetrics.tam || 'N/A'}, Revenue=${analysis.keyMetrics.revenue || 'N/A'}, Growth=${analysis.keyMetrics.growth || 'N/A'}` : ''}`);
+      }
+    });
+
+    // Fetch all emails for this startup
+    const emailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    // Sort emails by date and get summaries
+    const emailSummaries: string[] = [];
+    const sortedEmails = emailsSnapshot.docs
+      .map(doc => doc.data())
+      .sort((a, b) => {
+        const dateA = a.date?.toDate?.() || new Date(0);
+        const dateB = b.date?.toDate?.() || new Date(0);
+        return dateB.getTime() - dateA.getTime();
+      })
+      .slice(0, 10); // Last 10 emails
+
+    sortedEmails.forEach(email => {
+      const direction = email.direction === 'inbound' ? 'FROM FOUNDER' : 'TO FOUNDER';
+      const analysis = email.aiAnalysis;
+      let emailInfo = `[${direction}] ${email.subject || 'No subject'}`;
+
+      // Include brief body preview
+      const bodyPreview = (email.body || '').substring(0, 200).replace(/\n/g, ' ');
+      emailInfo += `\nPreview: ${bodyPreview}...`;
+
+      // Include AI analysis if available
+      if (analysis) {
+        emailInfo += `\nAI Analysis: Score ${analysis.responseQuality?.score || 'N/A'}/10, Recommendation: ${analysis.recommendation || 'N/A'}`;
+      }
+
+      emailSummaries.push(emailInfo);
+    });
+
+    // Build the consolidated AI summary
+    const aiSummary = {
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+      deckScore: latestDeckScore,
+      deckCount: deckAnalyses.length,
+      emailCount: sortedEmails.length,
+
+      // Plain text summary for AI prompts
+      summary: `
+=== STARTUP: ${startupData.name} ===
+Current Score: ${startupData.currentScore || 'Not scored'}/100
+Stage: ${startupData.stage || 'Unknown'}
+Founder: ${startupData.founderName || 'Unknown'}
+Description: ${startupData.description || 'N/A'}
+
+${deckAnalyses.length > 0 ? `=== PITCH DECK ANALYSIS (ALREADY REVIEWED) ===
+${deckAnalyses.join('\n')}` : '=== NO PITCH DECK ANALYZED YET ==='}
+
+${emailSummaries.length > 0 ? `=== EMAIL CONVERSATION HISTORY ===
+${emailSummaries.join('\n\n')}` : '=== NO EMAILS YET ==='}
+`.trim()
+    };
+
+    // Update startup document
+    await db.collection('startups').doc(startupId).update({
+      aiSummary,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    console.log(`[AI Summary] Updated summary for ${startupData.name}, deckCount: ${deckAnalyses.length}, emailCount: ${emailSummaries.length}`);
+  } catch (error) {
+    console.error(`[AI Summary] Error updating summary for ${startupId}:`, error);
   }
 }
 
@@ -1281,17 +1396,25 @@ app.post('/startups/:id/chat', authenticate, async (req: AuthRequest, res) => {
         return { role: d.role, content: d.content };
       });
 
-    // Build context about the startup
+    // Use the persistent AI summary if available, otherwise generate it
+    let aiSummary = startupData.aiSummary?.summary;
+    if (!aiSummary) {
+      console.log(`[Chat] No AI summary found for ${startupData.name}, generating now`);
+      await updateStartupAISummary(req.params.id as string);
+      const updatedDoc = await startupRef.get();
+      aiSummary = updatedDoc.data()?.aiSummary?.summary;
+    }
+
+    // Build context about the startup using the AI summary
     const startupContext = `
+${aiSummary || `
 Startup Information:
 - Name: ${startupData.name}
 - Status: ${startupData.status}
 - Stage: ${startupData.stage || 'Unknown'}
-- Sector: ${startupData.sector || 'Unknown'}
 - Description: ${startupData.description || 'No description'}
 - Current Score: ${startupData.currentScore ?? 'Not scored'}
-- Website: ${startupData.website || 'Not provided'}
-- Founder Email: ${startupData.founderEmail || 'Not provided'}
+`}
 
 ${startupData.businessModelAnalysis ? `
 Business Model Analysis:
@@ -1301,18 +1424,23 @@ Business Model Analysis:
 - Customer Segments: ${startupData.businessModelAnalysis.businessModel?.customerSegments?.join(', ') || 'Unknown'}
 - Market Size: ${startupData.businessModelAnalysis.marketAnalysis?.marketSize || 'Unknown'}
 - Competition: ${startupData.businessModelAnalysis.marketAnalysis?.competition || 'Unknown'}
-- Timing: ${startupData.businessModelAnalysis.marketAnalysis?.timing || 'Unknown'}
 - Strengths: ${startupData.businessModelAnalysis.strengths?.join('; ') || 'None identified'}
 - Concerns: ${startupData.businessModelAnalysis.concerns?.join('; ') || 'None identified'}
-- Key Questions: ${startupData.businessModelAnalysis.keyQuestions?.join('; ') || 'None'}
 ` : ''}
 
 ${startupData.snoozeReason ? `Snooze Reason: ${startupData.snoozeReason}` : ''}
 ${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
 `;
 
-    // Generate AI response
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    // Generate AI response with Google Search grounding for real-time info
+    // Note: Gemini 2.0 requires 'google_search' instead of 'googleSearchRetrieval'
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.0-flash',
+      tools: [{
+        google_search: {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any],
+    });
 
     const systemPrompt = `You are an AI assistant helping an individual angel investor (NOT a VC fund) analyze startup investment opportunities. The investor makes personal investments, not through a fund.
 
@@ -1322,6 +1450,7 @@ IMPORTANT CONTEXT:
 - The investor invests their own money personally, not through a fund
 - Use "you" and speak to them as an individual, not "your fund" or "your firm"
 - Keep advice practical for a personal investor's perspective
+- You have access to Google Search - use it to find websites, news, and other information about startups when needed
 
 You should:
 1. Provide thoughtful, practical analysis
@@ -1329,7 +1458,8 @@ You should:
 3. Suggest due diligence questions that a personal investor would ask
 4. Be direct and conversational - avoid corporate/VC jargon
 5. Keep responses concise and actionable
-6. If you don't have enough information, say so clearly
+6. When asked about websites, news, or public information - search the web to find it
+7. If information is in the startup context above, use that first before searching
 
 Previous conversation context is provided to maintain continuity.`;
 
@@ -3083,6 +3213,9 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 });
               }
 
+              // Update the startup's AI summary with new email analysis
+              await updateStartupAISummary(startupDoc.id);
+
               console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}${responseAnalysis ? ` - AI recommends: ${responseAnalysis.recommendation}` : ''}`);
               processed++;
               results.push({
@@ -4278,8 +4411,17 @@ app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Sort in memory
       .slice(0, 10); // Limit to 10
 
+    // Use the startup's persistent AI summary
+    let aiSummary = startupData.aiSummary?.summary;
+    if (!aiSummary) {
+      console.log(`[Re-analyze] No AI summary found, generating for ${startupId}`);
+      await updateStartupAISummary(startupId);
+      const updatedDoc = await db.collection('startups').doc(startupId).get();
+      aiSummary = updatedDoc.data()?.aiSummary?.summary;
+    }
+
     // Analyze the founder response
-    console.log(`[Re-analyze] Analyzing email ${emailId} for startup: ${startupData.name}`);
+    console.log(`[Re-analyze] Analyzing email ${emailId} for startup: ${startupData.name}, hasSummary: ${!!aiSummary}`);
     const responseAnalysis = await analyzeFounderResponse(
       {
         name: startupData.name,
@@ -4295,7 +4437,8 @@ app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res)
         body: emailData.body || '',
         from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
       },
-      previousEmails
+      previousEmails,
+      aiSummary || undefined
     );
 
     if (!responseAnalysis) {
@@ -4392,6 +4535,9 @@ app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res)
       console.log(`[Re-analyze] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore}`);
     }
 
+    // Update the startup's consolidated AI summary
+    await updateStartupAISummary(startupId);
+
     return res.json({
       success: true,
       analysis: {
@@ -4464,8 +4610,20 @@ app.post('/emails/:emailId/generate-reply', authenticate, async (req: AuthReques
     // Previous emails excludes the current one
     const previousEmails = allEmails.filter(e => e.id !== emailId).slice(0, 10);
 
-    // Generate AI reply
-    console.log(`[Generate Reply] Generating reply for email ${emailId}, startup: ${startupData.name}`);
+    // Use the startup's persistent AI summary (updated whenever deck/email is analyzed)
+    // If no summary exists yet, generate one now
+    let aiSummary = startupData.aiSummary?.summary;
+    if (!aiSummary) {
+      console.log(`[Generate Reply] No AI summary found, generating now for ${startupId}`);
+      await updateStartupAISummary(startupId);
+      // Re-fetch the startup to get the new summary
+      const updatedStartupDoc = await db.collection('startups').doc(startupId).get();
+      aiSummary = updatedStartupDoc.data()?.aiSummary?.summary;
+    }
+
+    console.log(`[Generate Reply] Using AI summary for ${startupData.name}, length: ${aiSummary?.length || 0}`);
+
+    // Generate AI reply using the consolidated summary
     const responseAnalysis = await analyzeFounderResponse(
       {
         name: startupData.name,
@@ -4481,7 +4639,8 @@ app.post('/emails/:emailId/generate-reply', authenticate, async (req: AuthReques
         body: emailData.body || '',
         from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
       },
-      previousEmails
+      previousEmails,
+      aiSummary || undefined
     );
 
     if (!responseAnalysis) {
@@ -4786,6 +4945,9 @@ Respond with ONLY the JSON object.`;
         }
       }
 
+      // Update the startup's consolidated AI summary
+      await updateStartupAISummary(startupId);
+
       console.log(`[Deck Analysis] Completed for ${fileName}, score: ${analysis.score}`);
     }
   } catch (error) {
@@ -4943,15 +5105,66 @@ app.get('/startups/:id/score-events', authenticate, async (req: AuthRequest, res
 app.get('/startups/:id/score-history', authenticate, async (req: AuthRequest, res) => {
   try {
     const startupId = req.params.id as string;
-    const snapshot = await db.collection('scoreHistory')
+    const days = parseInt(req.query.days as string) || 90;
+
+    // Get the startup to find its base score and creation date
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+    const startup = startupDoc.data()!;
+    const baseScore = startup.baseScore || startup.currentScore || 50;
+
+    // Get all score events for this startup
+    const eventsSnapshot = await db.collection('scoreEvents')
       .where('startupId', '==', startupId)
       .get();
 
-    const history = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      date: doc.data().date?.toDate?.()?.toISOString() || doc.data().date,
-    }));
+    // Build daily history from events
+    const today = new Date();
+    const startDate = new Date();
+    startDate.setDate(today.getDate() - days);
+
+    // Group events by date
+    const eventsByDate: Record<string, { totalImpact: number; count: number }> = {};
+
+    eventsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      const eventDate = data.createdAt?.toDate?.() || new Date(data.createdAt);
+      const dateKey = eventDate.toISOString().split('T')[0];
+
+      if (!eventsByDate[dateKey]) {
+        eventsByDate[dateKey] = { totalImpact: 0, count: 0 };
+      }
+      eventsByDate[dateKey].totalImpact += data.impact || 0;
+      eventsByDate[dateKey].count += 1;
+    });
+
+    // Generate daily history points
+    const history: Array<{ date: string; score: number; events: number }> = [];
+    let cumulativeImpact = 0;
+
+    // Calculate cumulative impact up to startDate
+    Object.entries(eventsByDate).forEach(([dateKey, data]) => {
+      if (new Date(dateKey) < startDate) {
+        cumulativeImpact += data.totalImpact;
+      }
+    });
+
+    // Generate daily points
+    for (let d = new Date(startDate); d <= today; d.setDate(d.getDate() + 1)) {
+      const dateKey = d.toISOString().split('T')[0];
+      const dayData = eventsByDate[dateKey] || { totalImpact: 0, count: 0 };
+
+      cumulativeImpact += dayData.totalImpact;
+      const score = Math.max(0, Math.min(100, baseScore + cumulativeImpact));
+
+      history.push({
+        date: dateKey,
+        score: Math.round(score),
+        events: dayData.count,
+      });
+    }
 
     return res.json(history);
   } catch (error) {
@@ -5270,6 +5483,9 @@ app.post('/startups/:id/send-reply', authenticate, async (req: AuthRequest, res)
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // Update the startup's AI summary with the new outbound email
+    await updateStartupAISummary(startupId);
+
     console.log(`[SendReply] Email sent successfully to ${toEmail} for ${data.name}, messageId: ${sendResult.messageId}`);
 
     return res.json({
@@ -5363,6 +5579,9 @@ app.post('/emails/startup/:startupId/compose', authenticate, async (req: AuthReq
       lastEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // Update the startup's AI summary with the new outbound email
+    await updateStartupAISummary(startupId);
 
     console.log(`[ComposeEmail] Email sent successfully to ${toEmail} for startup ${startupData.name}, messageId: ${sendResult.messageId}`);
 
@@ -5697,8 +5916,14 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
                     storagePath,
                     mimeType: attachment.contentType,
                     source: 'email_rescan',
-                    status: 'uploaded',
+                    status: 'processing',
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  });
+
+                  // Run AI analysis on the attachment
+                  console.log(`[RescanAttachments] Analyzing attachment: ${fileName}`);
+                  analyzeDeckWithAI(deckRef.id, attachment.content, fileName, id).catch(err => {
+                    console.error(`[RescanAttachments] AI analysis failed for ${fileName}:`, err);
                   });
 
                   attachmentData.push({
@@ -5710,7 +5935,7 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req: AuthReque
                   });
 
                   attachmentsFound++;
-                  console.log(`[RescanAttachments] Stored attachment: ${fileName}`);
+                  console.log(`[RescanAttachments] Stored and queued analysis for: ${fileName}`);
                 } catch (attachmentError) {
                   console.error(`[RescanAttachments] Failed to store attachment ${fileName}:`, attachmentError);
                 }
