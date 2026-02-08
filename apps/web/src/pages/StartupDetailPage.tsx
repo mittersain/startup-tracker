@@ -359,13 +359,29 @@ export default function StartupDetailPage() {
           </div>
 
           {/* Score breakdown bars */}
-          {breakdown && (
+          {breakdown && (() => {
+            // Calculate actual sum from breakdown to compare with displayed score
+            const maxScores = { team: 25, market: 25, product: 20, traction: 20, deal: 10 };
+            const calculatedTotal = (['team', 'market', 'product', 'traction', 'deal'] as const).reduce((sum, key) => {
+              const val = Math.min(breakdown[key]?.base || 0, maxScores[key]);
+              return sum + val;
+            }, 0);
+            const displayedScore = startup.currentScore ?? 0;
+            const scoreMismatch = Math.abs(calculatedTotal - displayedScore) > 1;
+
+            return (
             <div className="flex-1 max-w-md ml-8">
+              {scoreMismatch && (
+                <p className="text-xs text-warning-600 mb-2">
+                  ⚠ Score needs recalculation ({calculatedTotal} vs {displayedScore})
+                </p>
+              )}
               <div className="space-y-3">
                 {(['team', 'market', 'product', 'traction', 'deal'] as const).map((key) => {
                   const category = breakdown[key];
-                  const total = category.base + category.adjusted;
-                  const maxScore = key === 'deal' ? 10 : key === 'product' || key === 'traction' ? 20 : 25;
+                  // Clamp values to max and use base only (adjusted should be 0)
+                  const maxScore = maxScores[key];
+                  const total = Math.min(category.base + category.adjusted, maxScore);
                   const percentage = (total / maxScore) * 100;
 
                   return (
@@ -422,7 +438,8 @@ export default function StartupDetailPage() {
                 )}
               </div>
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
 
