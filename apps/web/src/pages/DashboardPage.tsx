@@ -467,16 +467,36 @@ export default function DashboardPage() {
               <Link
                 key={startup.id}
                 to={`/startups/${startup.id}`}
-                className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3"
+                className={clsx(
+                  "flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3",
+                  startup.hasNewResponse && "bg-green-50 border-l-4 border-green-500"
+                )}
               >
                 <div className="flex items-center gap-3 sm:gap-4">
-                  <div className="flex items-center justify-center w-10 h-10 bg-primary-100 rounded-lg flex-shrink-0">
-                    <span className="text-lg font-bold text-primary-600">
+                  <div className={clsx(
+                    "flex items-center justify-center w-10 h-10 rounded-lg flex-shrink-0 relative",
+                    startup.hasNewResponse ? "bg-green-100" : "bg-primary-100"
+                  )}>
+                    <span className={clsx(
+                      "text-lg font-bold",
+                      startup.hasNewResponse ? "text-green-600" : "text-primary-600"
+                    )}>
                       {startup.name.charAt(0)}
                     </span>
+                    {startup.hasNewResponse && (
+                      <span className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                    )}
                   </div>
                   <div className="min-w-0">
-                    <p className="font-medium text-gray-900 truncate">{startup.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-gray-900 truncate">{startup.name}</p>
+                      {startup.hasNewResponse && (
+                        <span className="badge bg-green-100 text-green-700 text-xs flex items-center gap-1">
+                          <Mail className="w-3 h-3" />
+                          New response
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className={clsx('badge text-xs', statusConfig[startup.status]?.color || 'bg-gray-100 text-gray-700')}>
                         {statusConfig[startup.status]?.label || startup.status}

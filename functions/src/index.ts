@@ -589,6 +589,91 @@ function sanitizeContent(content: string): string {
   return sanitizeHtml(content, sanitizeConfig).trim();
 }
 
+// ==================== RESPONSE TRACKING ====================
+
+const RESPONSE_TIMEOUT_DAYS = 3;
+
+// Helper to compute if startup is awaiting founder response
+function computeAwaitingResponse(startup: {
+  status: string;
+  lastEmailSentAt?: admin.firestore.Timestamp | null;
+  lastEmailReceivedAt?: admin.firestore.Timestamp | null;
+}): { isAwaitingResponse: boolean; daysSinceOutreach: number | null } {
+  // Only flag startups in 'reviewing' or 'due_diligence' status
+  if (startup.status !== 'reviewing' && startup.status !== 'due_diligence') {
+    return { isAwaitingResponse: false, daysSinceOutreach: null };
+  }
+
+  // No outbound email sent yet
+  if (!startup.lastEmailSentAt) {
+    return { isAwaitingResponse: false, daysSinceOutreach: null };
+  }
+
+  const sentAt = startup.lastEmailSentAt.toDate();
+  const now = new Date();
+  const daysSinceSent = Math.floor((now.getTime() - sentAt.getTime()) / (1000 * 60 * 60 * 24));
+
+  // Check if we received a response after sending
+  if (startup.lastEmailReceivedAt) {
+    const receivedAt = startup.lastEmailReceivedAt.toDate();
+    if (receivedAt > sentAt) {
+      // Response received after our last outreach
+      return { isAwaitingResponse: false, daysSinceOutreach: null };
+    }
+  }
+
+  // Check if timeout has passed
+  if (daysSinceSent >= RESPONSE_TIMEOUT_DAYS) {
+    return { isAwaitingResponse: true, daysSinceOutreach: daysSinceSent };
+  }
+
+  return { isAwaitingResponse: false, daysSinceOutreach: daysSinceSent };
+}
+
+const NEW_RESPONSE_HOURS = 48; // Highlight responses received in the last 48 hours
+
+// Helper to compute if startup has a new (unread) response from founder
+function computeHasNewResponse(startup: {
+  lastEmailSentAt?: admin.firestore.Timestamp | null;
+  lastEmailReceivedAt?: admin.firestore.Timestamp | null;
+  lastResponseReadAt?: admin.firestore.Timestamp | null;
+}): { hasNewResponse: boolean; hoursSinceResponse: number | null } {
+  // No response received
+  if (!startup.lastEmailReceivedAt) {
+    return { hasNewResponse: false, hoursSinceResponse: null };
+  }
+
+  const receivedAt = startup.lastEmailReceivedAt.toDate();
+  const now = new Date();
+  const hoursSinceReceived = Math.floor((now.getTime() - receivedAt.getTime()) / (1000 * 60 * 60));
+
+  // Check if response is after our last outreach (it's a reply to us)
+  if (startup.lastEmailSentAt) {
+    const sentAt = startup.lastEmailSentAt.toDate();
+    if (receivedAt <= sentAt) {
+      // This response came before our last email, not a new reply
+      return { hasNewResponse: false, hoursSinceResponse: null };
+    }
+  }
+
+  // Check if user has already read this response
+  if (startup.lastResponseReadAt) {
+    const readAt = startup.lastResponseReadAt.toDate();
+    if (readAt >= receivedAt) {
+      // User has read the response
+      return { hasNewResponse: false, hoursSinceResponse: null };
+    }
+  }
+
+  // Response is recent (within NEW_RESPONSE_HOURS) and unread
+  if (hoursSinceReceived <= NEW_RESPONSE_HOURS) {
+    return { hasNewResponse: true, hoursSinceResponse: hoursSinceReceived };
+  }
+
+  // Response is older but still unread - still show it
+  return { hasNewResponse: true, hoursSinceResponse: hoursSinceReceived };
+}
+
 // Create Express app
 const app = express();
 
@@ -819,6 +904,16 @@ app.get('/startups', authenticate, async (req: AuthRequest, res) => {
 
     let startups = snapshot.docs.map(doc => {
       const data = doc.data();
+      const awaitingResponse = computeAwaitingResponse({
+        status: data.status,
+        lastEmailSentAt: data.lastEmailSentAt,
+        lastEmailReceivedAt: data.lastEmailReceivedAt,
+      });
+      const newResponse = computeHasNewResponse({
+        lastEmailSentAt: data.lastEmailSentAt,
+        lastEmailReceivedAt: data.lastEmailReceivedAt,
+        lastResponseReadAt: data.lastResponseReadAt,
+      });
       return {
         id: doc.id,
         name: data.name as string,
@@ -837,6 +932,10 @@ app.get('/startups', authenticate, async (req: AuthRequest, res) => {
         organizationId: data.organizationId,
         createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
         updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt,
+        isAwaitingResponse: awaitingResponse.isAwaitingResponse,
+        daysSinceOutreach: awaitingResponse.daysSinceOutreach,
+        hasNewResponse: newResponse.hasNewResponse,
+        hoursSinceResponse: newResponse.hoursSinceResponse,
       };
     });
 
@@ -978,6 +1077,17 @@ app.get('/startups/:id', authenticate, async (req: AuthRequest, res) => {
       return undefined;
     };
 
+    const awaitingResponse = computeAwaitingResponse({
+      status: data.status,
+      lastEmailSentAt: data.lastEmailSentAt,
+      lastEmailReceivedAt: data.lastEmailReceivedAt,
+    });
+    const newResponse = computeHasNewResponse({
+      lastEmailSentAt: data.lastEmailSentAt,
+      lastEmailReceivedAt: data.lastEmailReceivedAt,
+      lastResponseReadAt: data.lastResponseReadAt,
+    });
+
     return res.json({
       id: startupDoc.id,
       ...data,
@@ -988,6 +1098,10 @@ app.get('/startups/:id', authenticate, async (req: AuthRequest, res) => {
       passedAt: toISOString(data.passedAt),
       snoozeEmailSentAt: toISOString(data.snoozeEmailSentAt),
       passEmailSentAt: toISOString(data.passEmailSentAt),
+      isAwaitingResponse: awaitingResponse.isAwaitingResponse,
+      daysSinceOutreach: awaitingResponse.daysSinceOutreach,
+      hasNewResponse: newResponse.hasNewResponse,
+      hoursSinceResponse: newResponse.hoursSinceResponse,
     });
   } catch (error) {
     console.error('Get startup error:', error);
@@ -1058,6 +1172,33 @@ app.patch('/startups/:id/status', authenticate, async (req: AuthRequest, res) =>
   } catch (error) {
     console.error('Update status error:', error);
     return res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+// Mark founder response as read
+app.post('/startups/:id/mark-response-read', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    await startupRef.update({
+      lastResponseReadAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Mark response read error:', error);
+    return res.status(500).json({ error: 'Failed to mark response as read' });
   }
 });
 

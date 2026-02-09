@@ -201,6 +201,23 @@ export default function StartupDetailPage() {
     enabled: !!id,
   });
 
+  // Mark response as read mutation
+  const markResponseReadMutation = useMutation({
+    mutationFn: () => startupsApi.markResponseRead(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+    },
+  });
+
+  // Auto-mark response as read when viewing a startup with new response
+  useEffect(() => {
+    if (startup?.hasNewResponse && id) {
+      markResponseReadMutation.mutate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startup?.hasNewResponse, id]);
+
   // Update chat messages when history loads
   useEffect(() => {
     if (chatHistory?.messages) {
@@ -618,6 +635,65 @@ export default function StartupDetailPage() {
           </select>
         </div>
       </div>
+
+      {/* Awaiting Response Banner */}
+      {startup.isAwaitingResponse && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex-shrink-0 w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center">
+                <Clock className="w-5 h-5 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-medium text-amber-800">No Response Received</h3>
+                <p className="text-sm text-amber-700">
+                  {startup.daysSinceOutreach} day{startup.daysSinceOutreach !== 1 ? 's' : ''} since last outreach with no response
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 ml-13 sm:ml-0">
+              <button
+                onClick={() => {
+                  setDecisionModalType('snooze');
+                  setDecisionReason('No response to outreach');
+                  setSnoozeMonths(3);
+                  setDraftDecisionEmail('');
+                  setShowEmailPreview(false);
+                }}
+                className="px-3 py-2 bg-amber-100 text-amber-700 rounded-lg hover:bg-amber-200 transition-colors text-sm font-medium flex items-center gap-1"
+              >
+                <PauseCircle className="w-4 h-4" />
+                Snooze
+              </button>
+              <button
+                onClick={() => {
+                  setDecisionModalType('pass');
+                  setDecisionReason('No response to outreach');
+                  setDraftDecisionEmail('');
+                  setShowEmailPreview(false);
+                }}
+                className="px-3 py-2 bg-amber-100 text-amber-700 rounded-lg hover:bg-amber-200 transition-colors text-sm font-medium flex items-center gap-1"
+              >
+                <XCircle className="w-4 h-4" />
+                Pass
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab('emails');
+                  setIsComposingEmail(true);
+                  setReplyToEmail(null);
+                  setComposeSubject(`Following up - ${startup.name}`);
+                  setComposeBody('');
+                }}
+                className="px-3 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors text-sm font-medium flex items-center gap-1"
+              >
+                <Send className="w-4 h-4" />
+                Follow Up
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Score card */}
       <div className="card p-4 sm:p-6">

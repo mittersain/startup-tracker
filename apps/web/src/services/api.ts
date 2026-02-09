@@ -190,6 +190,11 @@ export const startupsApi = {
     return response.data;
   },
 
+  markResponseRead: async (id: string) => {
+    const response = await api.post(`/startups/${id}/mark-response-read`);
+    return response.data;
+  },
+
   // AI Chat
   getChatHistory: async (id: string) => {
     const response = await api.get(`/startups/${id}/chat`);

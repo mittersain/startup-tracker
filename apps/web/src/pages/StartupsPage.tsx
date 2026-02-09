@@ -13,6 +13,8 @@ import {
   X,
   Loader2,
   FileText,
+  Clock,
+  Mail,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -178,16 +180,36 @@ export default function StartupsPage() {
             <Link
               key={startup.id}
               to={`/startups/${startup.id}`}
-              className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3"
+              className={clsx(
+                "flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3",
+                startup.hasNewResponse && "bg-green-50 border-l-4 border-green-500"
+              )}
             >
               <div className="flex items-center gap-3 sm:gap-4">
-                <div className="flex items-center justify-center w-10 sm:w-12 h-10 sm:h-12 bg-primary-100 rounded-lg flex-shrink-0">
-                  <span className="text-lg sm:text-xl font-bold text-primary-600">
+                <div className={clsx(
+                  "flex items-center justify-center w-10 sm:w-12 h-10 sm:h-12 rounded-lg flex-shrink-0 relative",
+                  startup.hasNewResponse ? "bg-green-100" : "bg-primary-100"
+                )}>
+                  <span className={clsx(
+                    "text-lg sm:text-xl font-bold",
+                    startup.hasNewResponse ? "text-green-600" : "text-primary-600"
+                  )}>
                     {startup.name.charAt(0)}
                   </span>
+                  {startup.hasNewResponse && (
+                    <span className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                  )}
                 </div>
                 <div className="min-w-0">
-                  <p className="font-semibold text-gray-900 truncate">{startup.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-semibold text-gray-900 truncate">{startup.name}</p>
+                    {startup.hasNewResponse && (
+                      <span className="badge bg-green-100 text-green-700 text-xs flex items-center gap-1">
+                        <Mail className="w-3 h-3" />
+                        New response
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
                     <span className={clsx('badge text-xs', statusColors[startup.status])}>
                       {statusOptions.find((s) => s.value === startup.status)?.label}
@@ -195,6 +217,12 @@ export default function StartupsPage() {
                     {startup.stage && (
                       <span className="badge bg-gray-100 text-gray-600 text-xs">
                         {stageOptions.find((s) => s.value === startup.stage)?.label}
+                      </span>
+                    )}
+                    {startup.isAwaitingResponse && (
+                      <span className="badge bg-amber-100 text-amber-700 text-xs flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {startup.daysSinceOutreach}d no response
                       </span>
                     )}
                   </div>

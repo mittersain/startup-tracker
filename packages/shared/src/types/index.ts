@@ -131,6 +131,12 @@ export interface Startup {
   customFields?: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
+
+  // Response tracking (computed fields)
+  isAwaitingResponse?: boolean;
+  daysSinceOutreach?: number | null;
+  hasNewResponse?: boolean;
+  hoursSinceResponse?: number | null;
 }
 
 export interface Founder {
