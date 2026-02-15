@@ -556,6 +556,47 @@ const db = admin.firestore();
 // Note: Using fallback for Firebase deployment compatibility, validate in production
 const JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER_JWT_SECRET_SET_IN_PRODUCTION';
 
+// ==================== ROLE PERMISSIONS ====================
+
+const ROLE_PERMISSIONS = {
+  admin: {
+    canViewAllDeals: true,
+    canAddDeals: true,
+    canEditDeals: true,
+    canDeleteDeals: true,
+    canManageUsers: true,
+    canManageSettings: true,
+    canExportData: true,
+  },
+  partner: {
+    canViewAllDeals: true,
+    canAddDeals: true,
+    canEditDeals: true,
+    canDeleteDeals: false,
+    canManageUsers: false,
+    canManageSettings: false,
+    canExportData: true,
+  },
+  analyst: {
+    canViewAllDeals: false,
+    canAddDeals: true,
+    canEditDeals: false,
+    canDeleteDeals: false,
+    canManageUsers: false,
+    canManageSettings: false,
+    canExportData: false,
+  },
+  viewer: {
+    canViewAllDeals: false,
+    canAddDeals: false,
+    canEditDeals: false,
+    canDeleteDeals: false,
+    canManageUsers: false,
+    canManageSettings: false,
+    canExportData: false,
+  },
+};
+
 // ==================== ZOD VALIDATION SCHEMAS ====================
 
 // Comment validation schema
@@ -630,15 +671,13 @@ function computeAwaitingResponse(startup: {
   return { isAwaitingResponse: false, daysSinceOutreach: daysSinceSent };
 }
 
-const NEW_RESPONSE_HOURS = 48; // Highlight responses received in the last 48 hours
-
-// Helper to compute if startup has a new (unread) response from founder
+// Helper to compute if startup has a new (unread) email from founder
 function computeHasNewResponse(startup: {
   lastEmailSentAt?: admin.firestore.Timestamp | null;
   lastEmailReceivedAt?: admin.firestore.Timestamp | null;
   lastResponseReadAt?: admin.firestore.Timestamp | null;
 }): { hasNewResponse: boolean; hoursSinceResponse: number | null } {
-  // No response received
+  // No email received from founder
   if (!startup.lastEmailReceivedAt) {
     return { hasNewResponse: false, hoursSinceResponse: null };
   }
@@ -647,30 +686,25 @@ function computeHasNewResponse(startup: {
   const now = new Date();
   const hoursSinceReceived = Math.floor((now.getTime() - receivedAt.getTime()) / (1000 * 60 * 60));
 
-  // Check if response is after our last outreach (it's a reply to us)
-  if (startup.lastEmailSentAt) {
-    const sentAt = startup.lastEmailSentAt.toDate();
-    if (receivedAt <= sentAt) {
-      // This response came before our last email, not a new reply
-      return { hasNewResponse: false, hoursSinceResponse: null };
-    }
-  }
-
-  // Check if user has already read this response
+  // Check if user has already read this email
   if (startup.lastResponseReadAt) {
     const readAt = startup.lastResponseReadAt.toDate();
     if (readAt >= receivedAt) {
-      // User has read the response
+      // User has read the email
       return { hasNewResponse: false, hoursSinceResponse: null };
     }
   }
 
-  // Response is recent (within NEW_RESPONSE_HOURS) and unread
-  if (hoursSinceReceived <= NEW_RESPONSE_HOURS) {
-    return { hasNewResponse: true, hoursSinceResponse: hoursSinceReceived };
+  // Check if we sent an email AFTER receiving this one (we've already responded)
+  if (startup.lastEmailSentAt) {
+    const sentAt = startup.lastEmailSentAt.toDate();
+    if (sentAt > receivedAt) {
+      // We already responded to this email, don't highlight
+      return { hasNewResponse: false, hoursSinceResponse: null };
+    }
   }
 
-  // Response is older but still unread - still show it
+  // New unread email from founder - highlight it
   return { hasNewResponse: true, hoursSinceResponse: hoursSinceReceived };
 }
 
@@ -812,6 +846,7 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       user: { id: userDoc.id, email: userData.email, name: userData.name, role: userData.role },
       organization: { id: orgDoc.id, name: orgData?.name },
       tokens: { accessToken, refreshToken: accessToken },
+      permissions: ROLE_PERMISSIONS[userData.role as keyof typeof ROLE_PERMISSIONS] || ROLE_PERMISSIONS.viewer,
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -3962,6 +3997,7 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       hasAttachments: proposalData.hasAttachments || false,
       attachmentCount: proposalData.attachments?.length || 0,
       firstEmailDate: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
+      lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(), // Track for new response highlighting
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };

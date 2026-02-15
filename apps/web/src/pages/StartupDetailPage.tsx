@@ -999,7 +999,7 @@ export default function StartupDetailPage() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-gray-900 truncate">{event.signal}</p>
                       <p className="text-xs text-gray-500">
-                        {format(new Date(event.timestamp), 'MMM d, yyyy')} · {event.category}
+                        {event.timestamp ? format(new Date(event.timestamp), 'MMM d, yyyy') : 'Unknown date'} · {event.category}
                       </p>
                     </div>
                     <span
