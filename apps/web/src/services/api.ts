@@ -221,6 +221,12 @@ export const startupsApi = {
     const response = await api.get(`/startups/${id}/enrichment`);
     return response.data;
   },
+
+  // Investment Memo
+  generateMemo: async (id: string) => {
+    const response = await api.post(`/startups/${id}/generate-memo`);
+    return response.data;
+  },
 };
 
 // Reminders API

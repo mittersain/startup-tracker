@@ -43,6 +43,9 @@ import {
   Link,
   Sparkles,
   TrendingUp as TrendUp,
+  FileDown,
+  Copy,
+  Share2,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -97,6 +100,7 @@ interface Email {
   direction: string;
   bodyPreview: string;
   bodyHtml: string | null;
+  body: string;
 }
 
 export default function StartupDetailPage() {
@@ -125,6 +129,11 @@ export default function StartupDetailPage() {
   const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>>([]);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  // Investment Memo state
+  const [showMemo, setShowMemo] = useState(false);
+  const [memoContent, setMemoContent] = useState<string | null>(null);
+  const [isGeneratingMemo, setIsGeneratingMemo] = useState(false);
 
   const { data: startup, isLoading } = useQuery({
     queryKey: ['startup', id],
@@ -747,7 +756,8 @@ export default function StartupDetailPage() {
                 {(['team', 'market', 'product', 'traction', 'deal'] as const).map((key) => {
                   const category = breakdown[key];
                   if (!category) return null;  // Skip if category is undefined
-                  const total = (category.base ?? 0) + (category.adjusted ?? 0);
+                  // Use adjusted if it exists, otherwise use base (not both added together)
+                  const total = category.adjusted ?? category.base ?? 0;
                   const maxScore = key === 'deal' ? 10 : key === 'product' || key === 'traction' ? 20 : 25;
                   const percentage = (total / maxScore) * 100;
 
@@ -821,12 +831,13 @@ export default function StartupDetailPage() {
                     const breakdown = startup.scoreBreakdown as ScoreBreakdown;
 
                     // Identify strongest and weakest areas (with null checks)
+                    // Use adjusted if it exists, otherwise use base (not both added together)
                     const categories = [
-                      { name: 'Team', score: (breakdown.team?.base ?? 0) + (breakdown.team?.adjusted ?? 0), max: 25 },
-                      { name: 'Market', score: (breakdown.market?.base ?? 0) + (breakdown.market?.adjusted ?? 0), max: 25 },
-                      { name: 'Product', score: (breakdown.product?.base ?? 0) + (breakdown.product?.adjusted ?? 0), max: 20 },
-                      { name: 'Traction', score: (breakdown.traction?.base ?? 0) + (breakdown.traction?.adjusted ?? 0), max: 20 },
-                      { name: 'Deal', score: (breakdown.deal?.base ?? 0) + (breakdown.deal?.adjusted ?? 0), max: 10 },
+                      { name: 'Team', score: breakdown.team?.adjusted ?? breakdown.team?.base ?? 0, max: 25 },
+                      { name: 'Market', score: breakdown.market?.adjusted ?? breakdown.market?.base ?? 0, max: 25 },
+                      { name: 'Product', score: breakdown.product?.adjusted ?? breakdown.product?.base ?? 0, max: 20 },
+                      { name: 'Traction', score: breakdown.traction?.adjusted ?? breakdown.traction?.base ?? 0, max: 20 },
+                      { name: 'Deal', score: breakdown.deal?.adjusted ?? breakdown.deal?.base ?? 0, max: 10 },
                     ];
 
                     const sortedByPercentage = [...categories].sort((a, b) => (b.score / b.max) - (a.score / a.max));
@@ -1152,6 +1163,106 @@ export default function StartupDetailPage() {
               <p className="text-sm text-gray-500 mt-1">Analysis is automatically generated when startups are added from email proposals.</p>
             </div>
           )}
+
+          {/* Investment Memo Section */}
+          <div className="card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <FileDown className="w-5 h-5 text-primary-600" />
+                <h3 className="font-semibold text-gray-900">Investment Memo</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                {memoContent && (
+                  <>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(memoContent);
+                        toast.success('Memo copied to clipboard');
+                      }}
+                      className="btn btn-secondary btn-sm flex items-center gap-1"
+                    >
+                      <Copy className="w-4 h-4" />
+                      Copy
+                    </button>
+                    <button
+                      onClick={() => setShowMemo(!showMemo)}
+                      className="btn btn-secondary btn-sm"
+                    >
+                      {showMemo ? 'Hide' : 'Show'}
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={async () => {
+                    setIsGeneratingMemo(true);
+                    try {
+                      const result = await startupsApi.generateMemo(id!);
+                      setMemoContent(result.memo);
+                      setShowMemo(true);
+                      toast.success('Investment memo generated');
+                    } catch (error) {
+                      toast.error('Failed to generate memo');
+                      console.error('Generate memo error:', error);
+                    } finally {
+                      setIsGeneratingMemo(false);
+                    }
+                  }}
+                  disabled={isGeneratingMemo}
+                  className="btn btn-primary flex items-center gap-2"
+                >
+                  {isGeneratingMemo ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Share2 className="w-4 h-4" />
+                      {memoContent ? 'Regenerate' : 'Generate Memo'}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Existing memo from startup data */}
+            {!memoContent && startup.investmentMemo?.content && (
+              <div className="mb-4">
+                <button
+                  onClick={() => {
+                    setMemoContent(startup.investmentMemo.content);
+                    setShowMemo(true);
+                  }}
+                  className="text-sm text-primary-600 hover:text-primary-700"
+                >
+                  Load previously generated memo {startup.investmentMemo.generatedAt ? (() => {
+                    try {
+                      const date = typeof startup.investmentMemo.generatedAt === 'object' && 'toDate' in startup.investmentMemo.generatedAt
+                        ? startup.investmentMemo.generatedAt.toDate()
+                        : new Date(startup.investmentMemo.generatedAt);
+                      return `(from ${format(date, 'MMM d, yyyy')})`;
+                    } catch {
+                      return '';
+                    }
+                  })() : ''}
+                </button>
+              </div>
+            )}
+
+            <p className="text-sm text-gray-600 mb-4">
+              Generate a professional investment memo to share with potential co-investors. The memo includes business overview, investment thesis, key metrics, and risk assessment.
+            </p>
+
+            {showMemo && memoContent && (
+              <div className="mt-4 border-t border-gray-200 pt-4">
+                <div className="bg-gray-50 rounded-lg p-6 prose prose-sm max-w-none">
+                  <pre className="whitespace-pre-wrap font-sans text-sm text-gray-800 leading-relaxed">
+                    {memoContent}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Snooze / Pass Decision Section */}
           <div className="card p-5">
@@ -1772,7 +1883,21 @@ export default function StartupDetailPage() {
                       <div key={idx} className="bg-gray-50 rounded-lg p-4">
                         <div className="flex items-start justify-between mb-2">
                           <div>
-                            <p className="font-medium text-gray-900">{founder.name}</p>
+                            {founder.linkedInUrl ? (
+                              <a
+                                href={founder.linkedInUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-medium text-gray-900 hover:text-blue-600 flex items-center gap-1.5 group"
+                              >
+                                {founder.name}
+                                <svg className="w-4 h-4 text-blue-500 group-hover:text-blue-700" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/>
+                                </svg>
+                              </a>
+                            ) : (
+                              <p className="font-medium text-gray-900">{founder.name}</p>
+                            )}
                             {founder.currentRole && (
                               <p className="text-sm text-primary-600">{founder.currentRole}</p>
                             )}
@@ -1782,9 +1907,9 @@ export default function StartupDetailPage() {
                               href={founder.linkedInUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="text-blue-600 hover:text-blue-700"
+                              className="text-xs text-blue-600 hover:text-blue-700 hover:underline"
                             >
-                              <Link className="w-4 h-4" />
+                              View Profile →
                             </a>
                           )}
                         </div>
@@ -2508,7 +2633,7 @@ export default function StartupDetailPage() {
                       }}
                     />
                   ) : (
-                    <p className="text-gray-700 whitespace-pre-wrap">{selectedEmail.bodyPreview}</p>
+                    <p className="text-gray-700 whitespace-pre-wrap">{selectedEmail.body || selectedEmail.bodyPreview}</p>
                   )}
                 </div>
 

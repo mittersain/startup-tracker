@@ -38,7 +38,7 @@ export default function SettingsPage() {
         <nav className="flex gap-8">
           {[
             { id: 'profile', label: 'Profile', icon: User },
-            ...(permissions?.canManageUsers ? [{ id: 'team', label: 'Team', icon: Users }] : []),
+            ...(permissions?.canManageUsers ? [{ id: 'team', label: 'Collab', icon: Users }] : []),
             { id: 'integrations', label: 'Integrations', icon: Mail },
           ].map((tab) => (
             <button
@@ -236,9 +236,9 @@ function TeamSettings() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-gray-900">Team Members</h3>
+        <h3 className="font-semibold text-gray-900">Collaborators</h3>
         <button onClick={() => setShowInviteModal(true)} className="btn-primary">
-          Invite Member
+          Invite Collaborator
         </button>
       </div>
 
@@ -298,7 +298,7 @@ function InviteModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Invite Team Member</h3>
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Invite Collaborator</h3>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

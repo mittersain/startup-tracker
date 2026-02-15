@@ -1873,7 +1873,7 @@ If information not found, use null. Return ONLY valid JSON.`;
 }
 
 // Helper: Search Crunchbase API
-async function fetchCrunchbaseData(companyName: string, website?: string): Promise<EnrichmentData['crunchbase'] | null> {
+async function fetchCrunchbaseData(companyName: string, website?: string, description?: string): Promise<EnrichmentData['crunchbase'] | null> {
   try {
     // Crunchbase API key - you'll need to add this to your environment
     const CRUNCHBASE_API_KEY = process.env.CRUNCHBASE_API_KEY;
@@ -1881,7 +1881,7 @@ async function fetchCrunchbaseData(companyName: string, website?: string): Promi
     if (!CRUNCHBASE_API_KEY) {
       console.log('[Enrichment] No Crunchbase API key configured');
       // Return mock/simulated data for now - will use AI to estimate
-      return await simulateCrunchbaseWithAI(companyName, website);
+      return await simulateCrunchbaseWithAI(companyName, website, description);
     }
 
     console.log(`[Enrichment] Fetching Crunchbase data for: ${companyName}`);
@@ -1896,13 +1896,13 @@ async function fetchCrunchbaseData(companyName: string, website?: string): Promi
 
     if (!searchResponse.ok) {
       console.log(`[Enrichment] Crunchbase search returned ${searchResponse.status}`);
-      return await simulateCrunchbaseWithAI(companyName, website);
+      return await simulateCrunchbaseWithAI(companyName, website, description);
     }
 
     const searchData = await searchResponse.json();
     if (!searchData.entities || searchData.entities.length === 0) {
       console.log('[Enrichment] No Crunchbase results found');
-      return await simulateCrunchbaseWithAI(companyName, website);
+      return await simulateCrunchbaseWithAI(companyName, website, description);
     }
 
     // Get the first matching organization
@@ -1918,7 +1918,7 @@ async function fetchCrunchbaseData(companyName: string, website?: string): Promi
     });
 
     if (!detailResponse.ok) {
-      return await simulateCrunchbaseWithAI(companyName, website);
+      return await simulateCrunchbaseWithAI(companyName, website, description);
     }
 
     const detailData = await detailResponse.json();
@@ -1949,17 +1949,23 @@ async function fetchCrunchbaseData(companyName: string, website?: string): Promi
     };
   } catch (error) {
     console.error('[Enrichment] Crunchbase fetch error:', error);
-    return await simulateCrunchbaseWithAI(companyName, website);
+    return await simulateCrunchbaseWithAI(companyName, website, description);
   }
 }
 
 // Helper: Use AI to estimate Crunchbase-like data when API not available
-async function simulateCrunchbaseWithAI(companyName: string, website?: string): Promise<EnrichmentData['crunchbase'] | null> {
+async function simulateCrunchbaseWithAI(companyName: string, website?: string, description?: string): Promise<EnrichmentData['crunchbase'] | null> {
   try {
     console.log(`[Enrichment] Using AI to research: ${companyName}`);
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const prompt = `Research the startup "${companyName}"${website ? ` (website: ${website})` : ''} and provide available information.
+    // Add sector/description context if available
+    const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
+
+    const prompt = `Research the startup "${companyName}" (India-based startup).
+${website ? `Website: ${website}` : ''}${sectorHint}
+
+IMPORTANT: Focus on the INDIAN company in this specific sector, not international companies with similar names.
 
 Return ONLY a JSON object with what you know (use null for unknown fields):
 {
@@ -1971,10 +1977,11 @@ Return ONLY a JSON object with what you know (use null for unknown fields):
   "lastFundingType": "seed, series_a, series_b, etc or null",
   "categories": ["industry category"],
   "competitors": [{"name": "competitor name", "shortDescription": "what they do"}] (max 3),
-  "marketInsights": "brief market analysis"
+  "marketInsights": "brief market analysis",
+  "headquarters": "city, India"
 }
 
-Be conservative - only include information you're confident about.`;
+Be conservative - only include information you're confident about. Make sure to research the INDIAN company.`;
 
     const result = await model.generateContent(prompt);
     const responseText = result.response.text().trim();
@@ -2065,7 +2072,8 @@ If you don't know any specific news, return an empty array [].`;
 async function fetchLinkedInCompanyData(
   companyName: string,
   website?: string,
-  linkedInUrl?: string
+  linkedInUrl?: string,
+  description?: string
 ): Promise<EnrichmentData['linkedin'] | null> {
   try {
     console.log(`[Enrichment] Fetching LinkedIn data for: ${companyName}`);
@@ -2073,7 +2081,13 @@ async function fetchLinkedInCompanyData(
     // Use AI to research LinkedIn company information
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const prompt = `Research the LinkedIn company profile for "${companyName}"${website ? ` (website: ${website})` : ''}${linkedInUrl ? ` (LinkedIn: ${linkedInUrl})` : ''}.
+    // Add sector/description context if available
+    const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
+
+    const prompt = `Research the LinkedIn company profile for "${companyName}" (India-based startup).
+${website ? `Website: ${website}` : ''}${linkedInUrl ? `\nLinkedIn: ${linkedInUrl}` : ''}${sectorHint}
+
+IMPORTANT: Focus on the INDIAN company in this specific sector, not international companies with similar names.
 
 Based on publicly available information about this company's LinkedIn presence, provide:
 
@@ -2118,7 +2132,8 @@ Use your knowledge to provide accurate information. If you're uncertain about sp
 async function fetchLinkedInFounderData(
   companyName: string,
   founderNames?: string[],
-  founderLinkedIns?: string[]
+  founderLinkedIns?: string[],
+  description?: string
 ): Promise<EnrichmentData['founders'] | null> {
   try {
     console.log(`[Enrichment] Fetching LinkedIn founder data for: ${companyName}`);
@@ -2126,26 +2141,32 @@ async function fetchLinkedInFounderData(
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
     const founderContext = founderNames && founderNames.length > 0
-      ? `Known founders: ${founderNames.join(', ')}`
+      ? `\nKNOWN FOUNDERS (YOU MUST USE THESE EXACT NAMES): ${founderNames.join(', ')}`
       : '';
 
     const linkedInContext = founderLinkedIns && founderLinkedIns.length > 0
-      ? `LinkedIn profiles: ${founderLinkedIns.join(', ')}`
+      ? `\nKnown LinkedIn profiles: ${founderLinkedIns.join(', ')}`
       : '';
 
-    const prompt = `Research the founders and key executives of "${companyName}".
-${founderContext}
-${linkedInContext}
+    // Add sector/description context if available
+    const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
 
-Based on publicly available LinkedIn information, provide details about the founding team and key executives.
+    const prompt = `Research the founders and key executives of "${companyName}" (India-based startup).${founderContext}${linkedInContext}${sectorHint}
 
-Return ONLY a JSON array with this structure:
+CRITICAL INSTRUCTIONS:
+1. If founder names are provided above, YOU MUST USE THOSE EXACT NAMES - do NOT make up different names
+2. Focus on the INDIAN company in this sector, not international companies with similar names
+3. Provide LinkedIn profile URLs if you know them (format: https://www.linkedin.com/in/username/)
+4. If you don't know the LinkedIn URL, set linkedInUrl to null
+
+Return ONLY a valid JSON array with this structure (no other text):
 [
   {
     "name": "Full Name",
     "currentRole": "their role at ${companyName}",
-    "headline": "their LinkedIn headline",
-    "location": "city, country",
+    "linkedInUrl": "https://www.linkedin.com/in/their-profile-slug/" or null,
+    "headline": "their LinkedIn headline or brief description",
+    "location": "city, India",
     "previousCompanies": [
       {"name": "Company Name", "role": "Their role", "duration": "e.g., 2 years"}
     ],
@@ -2158,20 +2179,28 @@ Return ONLY a JSON array with this structure:
 ]
 
 Provide information for up to 3 key founders/executives. Use your knowledge to provide accurate information.
-If you're uncertain about specific details, omit those fields.
+If you're uncertain about specific details, omit those fields or use null.
 Focus on founders, CEOs, CTOs, and other C-level executives.`;
 
     const result = await model.generateContent(prompt);
     const responseText = result.response.text().trim();
+
+    console.log(`[Enrichment] Founder data response length: ${responseText.length}`);
 
     let jsonStr = responseText;
     if (jsonStr.startsWith('```')) {
       jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
     }
 
+    // Try to extract JSON array if there's extra text
+    const jsonMatch = jsonStr.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+
     const founders = JSON.parse(jsonStr);
 
-    // Attach LinkedIn URLs if provided
+    // Override with provided LinkedIn URLs if available (these are known to be correct)
     if (founderLinkedIns && founders) {
       founders.forEach((founder: { name: string; linkedInUrl?: string }, idx: number) => {
         if (founderLinkedIns[idx]) {
@@ -2180,6 +2209,7 @@ Focus on founders, CEOs, CTOs, and other C-level executives.`;
       });
     }
 
+    console.log(`[Enrichment] Parsed ${founders?.length || 0} founders`);
     return founders && founders.length > 0 ? founders : null;
   } catch (error) {
     console.error('[Enrichment] LinkedIn founder data error:', error);
@@ -2398,7 +2428,7 @@ async function enrichStartup(startupId: string, startupData: Record<string, unkn
     // Run all enrichment tasks in parallel (Phase 1: Basic data)
     const [websiteData, crunchbaseData, newsData] = await Promise.all([
       startupData.website ? scrapeWebsite(startupData.website as string) : Promise.resolve(null),
-      fetchCrunchbaseData(startupData.name as string, startupData.website as string),
+      fetchCrunchbaseData(startupData.name as string, startupData.website as string, startupData.description as string | undefined),
       fetchGoogleNews(startupData.name as string),
     ]);
 
@@ -2419,12 +2449,14 @@ async function enrichStartup(startupId: string, startupData: Record<string, unkn
       fetchLinkedInCompanyData(
         startupData.name as string,
         startupData.website as string | undefined,
-        effectiveLinkedInUrl
+        effectiveLinkedInUrl,
+        startupData.description as string | undefined
       ),
       fetchLinkedInFounderData(
         startupData.name as string,
         effectiveFounderNames,
-        founderLinkedIns
+        founderLinkedIns,
+        startupData.description as string | undefined
       ),
     ]);
 
@@ -2944,6 +2976,169 @@ app.post('/startups/:id/analyze', authenticate, async (req: AuthRequest, res) =>
   } catch (error) {
     console.error('Analyze startup error:', error);
     return res.status(500).json({ error: 'Failed to analyze startup' });
+  }
+});
+
+// Generate Investment Memo for co-investor circulation
+app.post('/startups/:id/generate-memo', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupRef = db.collection('startups').doc(req.params.id as string);
+    const startupDoc = await startupRef.get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startup = startupDoc.data()!;
+    if (startup.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    console.log(`[Investment Memo] Generating memo for ${startup.name}...`);
+
+    // Fetch all relevant data for the memo
+    const [decksSnapshot, enrichmentData] = await Promise.all([
+      db.collection('decks').where('startupId', '==', req.params.id).get(),
+      Promise.resolve(startup.enrichmentData || {}),
+    ]);
+
+    // Get deck analyses
+    const deckAnalyses = decksSnapshot.docs
+      .filter(doc => doc.data().aiAnalysis)
+      .map(doc => {
+        const d = doc.data();
+        return {
+          fileName: d.fileName,
+          score: d.aiAnalysis?.score,
+          summary: d.aiAnalysis?.summary,
+          strengths: d.aiAnalysis?.strengths,
+          weaknesses: d.aiAnalysis?.weaknesses,
+          keyMetrics: d.aiAnalysis?.keyMetrics,
+          businessModel: d.aiAnalysis?.businessModel,
+        };
+      });
+
+    // Build comprehensive context
+    const businessAnalysis = startup.businessModelAnalysis || {};
+    const scoreBreakdown = startup.scoreBreakdown || {};
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    const prompt = `You are a venture capital analyst creating a professional Investment Memo to share with potential co-investors.
+
+Generate a concise but comprehensive Investment Memo for the following startup:
+
+=== STARTUP INFORMATION ===
+Company Name: ${startup.name}
+Sector: ${businessAnalysis.sector || startup.sector || 'Not specified'}
+Stage: ${startup.stage || businessAnalysis.stage || 'Not specified'}
+Founder: ${startup.founderName || 'Not specified'}
+Website: ${startup.website || 'Not specified'}
+Description: ${startup.description || 'Not specified'}
+
+=== AI SCORE ===
+Overall Score: ${startup.currentScore || 'Not scored'}/100
+Score Breakdown:
+- Team: ${scoreBreakdown.team?.score || 'N/A'}/100 - ${scoreBreakdown.team?.reasoning || ''}
+- Market: ${scoreBreakdown.market?.score || 'N/A'}/100 - ${scoreBreakdown.market?.reasoning || ''}
+- Product: ${scoreBreakdown.product?.score || 'N/A'}/100 - ${scoreBreakdown.product?.reasoning || ''}
+- Traction: ${scoreBreakdown.traction?.score || 'N/A'}/100 - ${scoreBreakdown.traction?.reasoning || ''}
+- Deal: ${scoreBreakdown.deal?.score || 'N/A'}/100 - ${scoreBreakdown.deal?.reasoning || ''}
+
+=== BUSINESS MODEL ===
+Type: ${businessAnalysis.businessModel?.type || 'Not specified'}
+Value Proposition: ${businessAnalysis.businessModel?.valueProposition || 'Not specified'}
+Revenue Streams: ${(businessAnalysis.businessModel?.revenueStreams || []).join(', ') || 'Not specified'}
+Customer Segments: ${(businessAnalysis.businessModel?.customerSegments || []).join(', ') || 'Not specified'}
+
+=== MARKET ANALYSIS ===
+Market Size: ${businessAnalysis.marketAnalysis?.marketSize || 'Not specified'}
+Competition: ${businessAnalysis.marketAnalysis?.competition || 'Not specified'}
+Timing: ${businessAnalysis.marketAnalysis?.timing || 'Not specified'}
+
+=== STRENGTHS ===
+${(businessAnalysis.strengths || []).map((s: string) => `- ${s}`).join('\n') || 'Not analyzed'}
+
+=== CONCERNS ===
+${(businessAnalysis.concerns || []).map((c: string) => `- ${c}`).join('\n') || 'Not analyzed'}
+
+=== PITCH DECK ANALYSIS ===
+${deckAnalyses.length > 0 ? deckAnalyses.map(d => `
+Deck: ${d.fileName}
+Score: ${d.score}/100
+Summary: ${d.summary || 'N/A'}
+Key Metrics: ${JSON.stringify(d.keyMetrics || {})}
+Strengths: ${(d.strengths || []).join(', ')}
+Weaknesses: ${(d.weaknesses || []).join(', ')}
+`).join('\n') : 'No pitch deck analyzed'}
+
+=== ENRICHMENT DATA ===
+${enrichmentData.crunchbase ? `
+Crunchbase:
+- Founded: ${enrichmentData.crunchbase.foundedOn || 'Unknown'}
+- Employees: ${enrichmentData.crunchbase.numEmployeesEnum || 'Unknown'}
+- Total Funding: ${enrichmentData.crunchbase.totalFundingUsd ? '$' + (enrichmentData.crunchbase.totalFundingUsd / 1000000).toFixed(1) + 'M' : 'Unknown'}
+- Last Round: ${enrichmentData.crunchbase.lastFundingType || 'Unknown'}
+` : ''}
+${enrichmentData.linkedin ? `
+LinkedIn:
+- Industry: ${enrichmentData.linkedin.industry || 'Unknown'}
+- Company Size: ${enrichmentData.linkedin.companySize || 'Unknown'}
+- Headquarters: ${enrichmentData.linkedin.headquarters || 'Unknown'}
+` : ''}
+
+---
+
+Create an Investment Memo with the following sections. Be professional, concise, and data-driven:
+
+1. **EXECUTIVE SUMMARY** (2-3 sentences overview of the opportunity)
+
+2. **COMPANY OVERVIEW**
+   - What they do
+   - Business model
+   - Target market
+
+3. **INVESTMENT THESIS** (3-5 bullet points on why this is an attractive investment)
+
+4. **KEY METRICS & TRACTION** (highlight any numbers from deck or description)
+
+5. **TEAM ASSESSMENT** (founder background, team strengths)
+
+6. **MARKET OPPORTUNITY** (TAM/SAM/SOM if available, market timing)
+
+7. **COMPETITIVE LANDSCAPE** (key competitors, differentiation)
+
+8. **RISKS & CONCERNS** (be honest about challenges)
+
+9. **INVESTMENT TERMS** (if known - round size, valuation, etc.)
+
+10. **RECOMMENDATION** (clear investment recommendation with reasoning)
+
+Format the output as clean markdown that can be easily shared with co-investors.`;
+
+    const result = await model.generateContent(prompt);
+    const memo = result.response.text().trim();
+
+    console.log(`[Investment Memo] Generated memo for ${startup.name}, length: ${memo.length}`);
+
+    // Optionally save the memo to the startup
+    await startupRef.update({
+      investmentMemo: {
+        content: memo,
+        generatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        generatedBy: req.user!.userId,
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      success: true,
+      memo,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('[Investment Memo] Error:', error);
+    return res.status(500).json({ error: 'Failed to generate investment memo' });
   }
 });
 
@@ -4787,15 +4982,42 @@ app.post('/emails/:emailId/generate-reply', authenticate, async (req: AuthReques
     // Previous emails excludes the current one
     const previousEmails = allEmails.filter(e => e.id !== emailId).slice(0, 10);
 
-    // Use the startup's persistent AI summary (updated whenever deck/email is analyzed)
-    // If no summary exists yet, generate one now
-    let aiSummary = startupData.aiSummary?.summary;
-    if (!aiSummary) {
-      console.log(`[Generate Reply] No AI summary found, generating now for ${startupId}`);
-      await updateStartupAISummary(startupId);
-      // Re-fetch the startup to get the new summary
-      const updatedStartupDoc = await db.collection('startups').doc(startupId).get();
-      aiSummary = updatedStartupDoc.data()?.aiSummary?.summary;
+    // ALWAYS refresh the AI summary to get latest deck analysis
+    console.log(`[Generate Reply] Refreshing AI summary for ${startupId}`);
+    await updateStartupAISummary(startupId);
+
+    // Re-fetch the startup to get the fresh summary
+    const refreshedStartupDoc = await db.collection('startups').doc(startupId).get();
+    let aiSummary = refreshedStartupDoc.data()?.aiSummary?.summary || '';
+
+    // If summary is empty or doesn't include deck analysis, directly fetch deck analyses
+    if (!aiSummary || aiSummary.includes('NO PITCH DECK ANALYZED YET') || !aiSummary.includes('PITCH DECK')) {
+      console.log(`[Generate Reply] Summary missing deck analysis, fetching decks directly`);
+      const decksSnapshot = await db.collection('decks')
+        .where('startupId', '==', startupId)
+        .get();
+
+      if (!decksSnapshot.empty) {
+        const deckAnalyses = decksSnapshot.docs
+          .filter(doc => doc.data().aiAnalysis)
+          .map(doc => {
+            const d = doc.data();
+            const analysis = d.aiAnalysis;
+            return `Deck: ${d.fileName}
+Score: ${analysis.score}/100
+Summary: ${analysis.summary || 'N/A'}
+Strengths: ${analysis.strengths?.join(', ') || 'N/A'}
+Weaknesses: ${analysis.weaknesses?.join(', ') || 'N/A'}
+Business Model: ${analysis.businessModel || 'N/A'}
+Key Metrics: ${JSON.stringify(analysis.keyMetrics || {})}`;
+          })
+          .join('\n\n');
+
+        if (deckAnalyses) {
+          console.log(`[Generate Reply] Found ${decksSnapshot.docs.length} decks with analysis`);
+          aiSummary = `=== PITCH DECK ANALYSIS ===\n${deckAnalyses}\n\n${aiSummary || ''}`;
+        }
+      }
     }
 
     console.log(`[Generate Reply] Using AI summary for ${startupData.name}, length: ${aiSummary?.length || 0}`);
@@ -6792,6 +7014,107 @@ app.put('/notifications/read-all', authenticate, async (req: AuthRequest, res) =
   } catch (error) {
     console.error('[Notifications] Error marking all as read:', error);
     return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+  }
+});
+
+// Invite a new user to the organization
+app.post('/users/invite', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { email, name, role } = req.body;
+
+    if (!email || !name) {
+      return res.status(400).json({ error: 'Email and name are required' });
+    }
+
+    // Check if user has permission to invite
+    const inviterDoc = await db.collection('users').doc(req.user!.userId).get();
+    const inviterData = inviterDoc.data();
+    if (inviterData?.role !== 'admin' && inviterData?.role !== 'partner') {
+      return res.status(403).json({ error: 'Only admins and partners can invite users' });
+    }
+
+    // Check if email already exists in organization
+    const existingUser = await db.collection('users')
+      .where('email', '==', email.toLowerCase())
+      .where('organizationId', '==', req.user!.organizationId)
+      .get();
+
+    if (!existingUser.empty) {
+      return res.status(400).json({ error: 'A user with this email already exists in your organization' });
+    }
+
+    // Generate a temporary password
+    const tempPassword = require('crypto').randomBytes(8).toString('hex');
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+    // Create the new user
+    const userRef = db.collection('users').doc();
+    await userRef.set({
+      email: email.toLowerCase(),
+      name,
+      role: role || 'analyst',
+      organizationId: req.user!.organizationId,
+      password: hashedPassword,
+      isInvited: true,
+      invitedBy: req.user!.userId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Send invitation email
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER || 'nitishvm@gmail.com',
+        pass: process.env.SMTP_PASSWORD,
+      },
+    });
+
+    const loginUrl = 'https://startup-tracker-app.web.app/login';
+
+    try {
+      await transporter.sendMail({
+        from: `"Startup Tracker" <${process.env.SMTP_USER || 'nitishvm@gmail.com'}>`,
+        to: email,
+        subject: `You've been invited to join Startup Tracker`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Welcome to Startup Tracker!</h2>
+            <p>${inviterData?.name || 'Someone'} has invited you to join their organization on Startup Tracker.</p>
+            <p><strong>Your login credentials:</strong></p>
+            <ul>
+              <li><strong>Email:</strong> ${email}</li>
+              <li><strong>Temporary Password:</strong> ${tempPassword}</li>
+            </ul>
+            <p style="margin: 24px 0;">
+              <a href="${loginUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Login Now</a>
+            </p>
+            <p style="color: #666; font-size: 14px;">Please change your password after logging in.</p>
+          </div>
+        `,
+      });
+      console.log(`[Users] Sent invite email to ${email}`);
+    } catch (emailError) {
+      console.error('[Users] Failed to send invite email:', emailError);
+      // User is created, but email failed - return success with warning
+      return res.json({
+        success: true,
+        warning: 'User created but email delivery failed. Please share credentials manually.',
+        user: { id: userRef.id, email, name, role: role || 'analyst' },
+        tempPassword, // Return so admin can share manually
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Invitation sent successfully',
+      user: { id: userRef.id, email, name, role: role || 'analyst' },
+    });
+  } catch (error) {
+    console.error('[Users] Error inviting user:', error);
+    return res.status(500).json({ error: 'Failed to invite user' });
   }
 });
 
