@@ -15,8 +15,6 @@ function getScoreStyle(score: number): { bg: string; text: string; label: string
     return { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Strong' };
   } else if (score >= 55) {
     return { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Promising' };
-  } else if (score >= 40) {
-    return { bg: 'bg-orange-100', text: 'text-orange-700', label: 'Below Avg' };
   } else {
     return { bg: 'bg-red-100', text: 'text-red-700', label: 'Weak' };
   }

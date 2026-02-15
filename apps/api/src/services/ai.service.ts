@@ -676,11 +676,95 @@ Return ONLY valid JSON.`;
   const text = await this.callGemini(prompt);
 
     try {
-      return this.extractJson<EvaluationScoreResult>(text);
+      const result = this.extractJson<EvaluationScoreResult>(text);
+      return this.validateEvaluationScores(result, isPostRevenue);
     } catch {
       console.error('Failed to parse evaluation score:', text);
       throw new Error('Failed to score startup evaluation');
     }
+  }
+
+  /**
+   * Validate and fix AI-returned evaluation scores
+   */
+  private validateEvaluationScores(result: EvaluationScoreResult, isPostRevenue: boolean): EvaluationScoreResult {
+    // Helper to clamp a criterion's score to its maxScore
+    const clampCriterion = (c: ScoreCriteria, expectedMax?: number): ScoreCriteria => {
+      const maxScore = expectedMax ?? c.maxScore;
+      return {
+        ...c,
+        maxScore,
+        score: Math.max(0, Math.min(maxScore, c.score)),
+      };
+    };
+
+    // Clamp all criteria to their expected maxScores
+    result.contrarianInsight = clampCriterion(result.contrarianInsight, isPostRevenue ? 6 : 7);
+    result.productAdvantage10x = clampCriterion(result.productAdvantage10x, isPostRevenue ? 6 : 7);
+    result.monopolyPotential = clampCriterion(result.monopolyPotential, isPostRevenue ? 6 : 7);
+    result.moatDurability = clampCriterion(result.moatDurability, isPostRevenue ? 6 : 7);
+    result.longTermViability = clampCriterion(result.longTermViability, isPostRevenue ? 5 : 6);
+    result.founderQuality = clampCriterion(result.founderQuality, isPostRevenue ? 5 : 6);
+    result.teamLeverage = clampCriterion(result.teamLeverage, isPostRevenue ? 4 : 5);
+    result.timing = clampCriterion(result.timing, isPostRevenue ? 4 : 5);
+    result.distributionAdvantage = clampCriterion(result.distributionAdvantage, 4);
+    result.missionPurpose = clampCriterion(result.missionPurpose, 4);
+
+    result.determination = clampCriterion(result.determination, isPostRevenue ? 4 : 6);
+    result.founderMarketFit = clampCriterion(result.founderMarketFit, isPostRevenue ? 4 : 6);
+    result.cofounderChemistry = clampCriterion(result.cofounderChemistry, isPostRevenue ? 4 : 5);
+    result.adaptability = clampCriterion(result.adaptability, isPostRevenue ? 3 : 5);
+
+    result.tamSizeGrowth = clampCriterion(result.tamSizeGrowth, 4);
+    result.winnerTakeAll = clampCriterion(result.winnerTakeAll, 3);
+    result.competitiveLandscape = clampCriterion(result.competitiveLandscape, 3);
+
+    result.revenueGrowth = clampCriterion(result.revenueGrowth, isPostRevenue ? 5 : 0);
+    result.userCustomerGrowth = clampCriterion(result.userCustomerGrowth, isPostRevenue ? 4 : 0);
+    result.unitEconomics = clampCriterion(result.unitEconomics, isPostRevenue ? 3 : 0);
+    result.retentionChurn = clampCriterion(result.retentionChurn, isPostRevenue ? 3 : 0);
+
+    result.scalability = clampCriterion(result.scalability, 4);
+    result.pathToProfitability = clampCriterion(result.pathToProfitability, 3);
+    result.capitalEfficiency = clampCriterion(result.capitalEfficiency, 3);
+
+    // Recalculate section scores from validated criteria
+    result.thielScore =
+      result.contrarianInsight.score + result.productAdvantage10x.score +
+      result.monopolyPotential.score + result.moatDurability.score +
+      result.longTermViability.score + result.founderQuality.score +
+      result.teamLeverage.score + result.timing.score +
+      result.distributionAdvantage.score + result.missionPurpose.score;
+
+    result.founderTeamScore =
+      result.determination.score + result.founderMarketFit.score +
+      result.cofounderChemistry.score + result.adaptability.score;
+
+    result.marketScore =
+      result.tamSizeGrowth.score + result.winnerTakeAll.score +
+      result.competitiveLandscape.score;
+
+    result.tractionScore =
+      result.revenueGrowth.score + result.userCustomerGrowth.score +
+      result.unitEconomics.score + result.retentionChurn.score;
+
+    result.businessModelScore =
+      result.scalability.score + result.pathToProfitability.score +
+      result.capitalEfficiency.score;
+
+    // Recalculate total from section scores
+    result.totalScore = Math.max(0, Math.min(100,
+      result.thielScore + result.founderTeamScore + result.marketScore +
+      result.tractionScore + result.businessModelScore
+    ));
+
+    // Ensure recommendation matches recalculated score
+    if (result.totalScore >= 85) result.recommendation = 'strong_invest';
+    else if (result.totalScore >= 70) result.recommendation = 'invest';
+    else if (result.totalScore >= 55) result.recommendation = 'consider';
+    else result.recommendation = 'pass';
+
+    return result;
   }
 
   /**

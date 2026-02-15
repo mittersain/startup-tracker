@@ -51,7 +51,7 @@ interface Props {
 }
 
 function getScoreColor(score: number, maxScore: number): string {
-  const percentage = (score / maxScore) * 100;
+  const percentage = maxScore > 0 ? (score / maxScore) * 100 : 0;
   if (percentage >= 80) return 'text-green-600 bg-green-100';
   if (percentage >= 60) return 'text-blue-600 bg-blue-100';
   if (percentage >= 40) return 'text-yellow-600 bg-yellow-100';

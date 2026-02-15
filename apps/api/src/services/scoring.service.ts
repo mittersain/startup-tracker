@@ -31,6 +31,10 @@ export class ScoringService {
    * Add a score event and recalculate the startup's score
    */
   async addScoreEvent(input: ScoreEventInput): Promise<ScoreEvent> {
+    // Validate and clamp impact and confidence
+    const impact = Math.max(-10, Math.min(10, input.impact));
+    const confidence = Math.max(0, Math.min(1, input.confidence ?? 1.0));
+
     // Create the event
     const event = await prisma.scoreEvent.create({
       data: {
@@ -39,8 +43,8 @@ export class ScoringService {
         sourceId: input.sourceId,
         category: input.category,
         signal: input.signal,
-        impact: input.impact,
-        confidence: input.confidence ?? 1.0,
+        impact,
+        confidence,
         evidence: input.evidence,
         analyzedBy: input.analyzedBy,
         userId: input.userId,
@@ -66,8 +70,8 @@ export class ScoringService {
         sourceId: e.sourceId,
         category: e.category,
         signal: e.signal,
-        impact: e.impact,
-        confidence: e.confidence ?? 1.0,
+        impact: Math.max(-10, Math.min(10, e.impact)),
+        confidence: Math.max(0, Math.min(1, e.confidence ?? 1.0)),
         evidence: e.evidence,
         analyzedBy: e.analyzedBy,
         userId: e.userId,
@@ -106,32 +110,42 @@ export class ScoringService {
     });
 
     // Initialize breakdown from base score or defaults
-    const existingBreakdown = startup.scoreBreakdown as ScoreBreakdown | null;
+    // Safely parse existing breakdown, falling back to defaults if corrupted
+    let existingBreakdown: ScoreBreakdown | null = null;
+    try {
+      const raw = startup.scoreBreakdown as Record<string, unknown> | null;
+      if (raw && typeof raw === 'object' && 'team' in raw && 'market' in raw) {
+        existingBreakdown = raw as ScoreBreakdown;
+      }
+    } catch {
+      existingBreakdown = null;
+    }
+
     const breakdown: ScoreBreakdown = {
       team: {
-        base: existingBreakdown?.team.base ?? 0,
+        base: existingBreakdown?.team?.base ?? 0,
         adjusted: 0,
-        subcriteria: existingBreakdown?.team.subcriteria ?? {},
+        subcriteria: existingBreakdown?.team?.subcriteria ?? {},
       },
       market: {
-        base: existingBreakdown?.market.base ?? 0,
+        base: existingBreakdown?.market?.base ?? 0,
         adjusted: 0,
-        subcriteria: existingBreakdown?.market.subcriteria ?? {},
+        subcriteria: existingBreakdown?.market?.subcriteria ?? {},
       },
       product: {
-        base: existingBreakdown?.product.base ?? 0,
+        base: existingBreakdown?.product?.base ?? 0,
         adjusted: 0,
-        subcriteria: existingBreakdown?.product.subcriteria ?? {},
+        subcriteria: existingBreakdown?.product?.subcriteria ?? {},
       },
       traction: {
-        base: existingBreakdown?.traction.base ?? 0,
+        base: existingBreakdown?.traction?.base ?? 0,
         adjusted: 0,
-        subcriteria: existingBreakdown?.traction.subcriteria ?? {},
+        subcriteria: existingBreakdown?.traction?.subcriteria ?? {},
       },
       deal: {
-        base: existingBreakdown?.deal.base ?? 0,
+        base: existingBreakdown?.deal?.base ?? 0,
         adjusted: 0,
-        subcriteria: existingBreakdown?.deal.subcriteria ?? {},
+        subcriteria: existingBreakdown?.deal?.subcriteria ?? {},
       },
       communication: 0,
       momentum: 0,
@@ -141,8 +155,12 @@ export class ScoringService {
     // Apply events with time decay
     const now = new Date();
     for (const event of events) {
+      // Clamp impact and confidence to valid ranges
+      const impact = Math.max(-10, Math.min(10, event.impact));
+      const confidence = Math.max(0, Math.min(1, event.confidence));
+
       const decayFactor = this.calculateDecay(event.timestamp, now);
-      const weightedImpact = event.impact * event.confidence * decayFactor;
+      const weightedImpact = impact * confidence * decayFactor;
 
       switch (event.category) {
         case 'communication':
@@ -166,6 +184,11 @@ export class ScoringService {
       }
     }
 
+    // Clamp cumulative categories to reasonable bounds (-20 to +20)
+    breakdown.communication = Math.max(-20, Math.min(20, breakdown.communication));
+    breakdown.momentum = Math.max(-20, Math.min(20, breakdown.momentum));
+    breakdown.redFlags = Math.max(0, Math.min(30, Math.abs(breakdown.redFlags)));
+
     // Calculate base score from category bases
     const baseScore = startup.baseScore ??
       breakdown.team.base +
@@ -174,7 +197,7 @@ export class ScoringService {
       breakdown.traction.base +
       breakdown.deal.base;
 
-    // Calculate adjustments
+    // Calculate adjustments (red flags are subtracted)
     const adjustments =
       breakdown.team.adjusted +
       breakdown.market.adjusted +
@@ -182,8 +205,8 @@ export class ScoringService {
       breakdown.traction.adjusted +
       breakdown.deal.adjusted +
       breakdown.communication +
-      breakdown.momentum +
-      breakdown.redFlags;
+      breakdown.momentum -
+      Math.abs(breakdown.redFlags);
 
     // Final score (capped 0-100)
     const currentScore = Math.max(0, Math.min(100, Math.round(baseScore + adjustments)));
@@ -231,25 +254,30 @@ export class ScoringService {
    */
   private async calculateTrend(
     startupId: string,
-    _currentScore: number
+    currentScore: number
   ): Promise<{ trend: 'up' | 'down' | 'stable'; delta: number }> {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    // Get events from the last 30 days
+    // Get the most recent score snapshot from ~30 days ago
+    // by checking score alerts or computing from history
     const recentEvents = await prisma.scoreEvent.findMany({
       where: {
         startupId,
         timestamp: { gte: thirtyDaysAgo },
       },
-      select: { impact: true, confidence: true },
+      select: { impact: true, confidence: true, category: true },
     });
 
-    // Sum of weighted impacts
-    const delta = recentEvents.reduce(
-      (sum, e) => sum + e.impact * e.confidence,
-      0
-    );
+    // Sum weighted impacts with decay, accounting for red flags
+    const now = new Date();
+    const delta = recentEvents.reduce((sum, e) => {
+      const impact = Math.max(-10, Math.min(10, e.impact));
+      const confidence = Math.max(0, Math.min(1, e.confidence));
+      const weighted = impact * confidence;
+      // Red flags should be subtracted
+      return e.category === 'red_flag' ? sum - Math.abs(weighted) : sum + weighted;
+    }, 0);
 
     let trend: 'up' | 'down' | 'stable';
     if (delta > 2) {
@@ -260,7 +288,7 @@ export class ScoringService {
       trend = 'stable';
     }
 
-    return { trend, delta };
+    return { trend, delta: Math.round(delta * 10) / 10 };
   }
 
   /**
@@ -307,7 +335,7 @@ export class ScoringService {
       });
     }
 
-    // Milestone crossings
+    // Milestone crossings (detect all crossed thresholds, not just the first)
     const milestones = [90, 80, 70, 50];
     for (const milestone of milestones) {
       if (
@@ -319,7 +347,6 @@ export class ScoringService {
           urgency: 'medium',
           trigger: `Score crossed ${milestone} threshold`,
         });
-        break;
       }
     }
 
@@ -371,27 +398,55 @@ export class ScoringService {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
 
-    const events = await prisma.scoreEvent.findMany({
-      where: {
-        startupId,
-        timestamp: { gte: startDate },
-      },
+    // Get the startup's base score
+    const startup = await prisma.startup.findUnique({
+      where: { id: startupId },
+      select: { baseScore: true },
+    });
+    const baseScore = startup?.baseScore ?? 0;
+
+    // Get ALL events (not just recent) to compute accurate running scores
+    const allEvents = await prisma.scoreEvent.findMany({
+      where: { startupId },
       orderBy: { timestamp: 'asc' },
     });
 
-    // Group events by day
+    // Group events by day and compute actual score snapshots with time decay
     const dailyData = new Map<string, { score: number; events: number }>();
 
-    let runningScore = 0;
-    for (const event of events) {
-      const dateKey = event.timestamp.toISOString().split('T')[0]!;
-      const existing = dailyData.get(dateKey) ?? { score: 0, events: 0 };
+    // For each day in the range, calculate the score as it would have been on that day
+    const current = new Date(startDate);
+    const endDate = new Date();
+    while (current <= endDate) {
+      const dateKey = current.toISOString().split('T')[0]!;
+      const dayEnd = new Date(current);
+      dayEnd.setHours(23, 59, 59, 999);
 
-      runningScore += event.impact * event.confidence;
-      existing.score = runningScore;
-      existing.events += 1;
+      // Get events up to this day and apply time decay relative to this day
+      const eventsUpToDay = allEvents.filter((e) => e.timestamp <= dayEnd);
+      const dayEventCount = allEvents.filter((e) => {
+        const eKey = e.timestamp.toISOString().split('T')[0];
+        return eKey === dateKey;
+      }).length;
 
-      dailyData.set(dateKey, existing);
+      if (dayEventCount > 0 || dailyData.size === 0) {
+        let adjustments = 0;
+        for (const event of eventsUpToDay) {
+          const decayFactor = this.calculateDecay(event.timestamp, dayEnd);
+          const weightedImpact = event.impact * event.confidence * decayFactor;
+          // Red flags should be subtracted
+          if (event.category === 'red_flag') {
+            adjustments -= Math.abs(weightedImpact);
+          } else {
+            adjustments += weightedImpact;
+          }
+        }
+
+        const score = Math.max(0, Math.min(100, Math.round(baseScore + adjustments)));
+        dailyData.set(dateKey, { score, events: dayEventCount });
+      }
+
+      current.setDate(current.getDate() + 1);
     }
 
     // Convert to array
