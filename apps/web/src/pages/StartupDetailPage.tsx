@@ -831,13 +831,13 @@ export default function StartupDetailPage() {
                     const breakdown = startup.scoreBreakdown as ScoreBreakdown;
 
                     // Identify strongest and weakest areas (with null checks)
-                    // Use adjusted if it exists, otherwise use base (not both added together)
+                    // Score = base + adjusted (adjusted is incremental on top of base)
                     const categories = [
-                      { name: 'Team', score: breakdown.team?.adjusted ?? breakdown.team?.base ?? 0, max: 25 },
-                      { name: 'Market', score: breakdown.market?.adjusted ?? breakdown.market?.base ?? 0, max: 25 },
-                      { name: 'Product', score: breakdown.product?.adjusted ?? breakdown.product?.base ?? 0, max: 20 },
-                      { name: 'Traction', score: breakdown.traction?.adjusted ?? breakdown.traction?.base ?? 0, max: 20 },
-                      { name: 'Deal', score: breakdown.deal?.adjusted ?? breakdown.deal?.base ?? 0, max: 10 },
+                      { name: 'Team', score: (breakdown.team?.base ?? 0) + (breakdown.team?.adjusted ?? 0), max: 25 },
+                      { name: 'Market', score: (breakdown.market?.base ?? 0) + (breakdown.market?.adjusted ?? 0), max: 25 },
+                      { name: 'Product', score: (breakdown.product?.base ?? 0) + (breakdown.product?.adjusted ?? 0), max: 20 },
+                      { name: 'Traction', score: (breakdown.traction?.base ?? 0) + (breakdown.traction?.adjusted ?? 0), max: 20 },
+                      { name: 'Deal', score: (breakdown.deal?.base ?? 0) + (breakdown.deal?.adjusted ?? 0), max: 10 },
                     ];
 
                     const sortedByPercentage = [...categories].sort((a, b) => (b.score / b.max) - (a.score / a.max));

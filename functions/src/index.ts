@@ -135,11 +135,11 @@ Provide your analysis as a JSON object with this exact structure:
 {
   "currentScore": number (0-100, overall investibility score),
   "scoreBreakdown": {
-    "team": { "base": number (0-25), "adjusted": 0, "subcriteria": { "experience": number, "domain_expertise": number, "execution_ability": number } },
-    "market": { "base": number (0-25), "adjusted": 0, "subcriteria": { "size": number, "growth": number, "timing": number } },
-    "product": { "base": number (0-20), "adjusted": 0, "subcriteria": { "innovation": number, "defensibility": number, "scalability": number } },
-    "traction": { "base": number (0-20), "adjusted": 0, "subcriteria": { "revenue": number, "users": number, "growth_rate": number } },
-    "deal": { "base": number (0-10), "adjusted": 0, "subcriteria": { "valuation": number, "terms": number } },
+    "team": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "experience": number (0-10), "domain_expertise": number (0-10), "execution_ability": number (0-5) } },
+    "market": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "size": number (0-10), "growth": number (0-10), "timing": number (0-5) } },
+    "product": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "innovation": number (0-8), "defensibility": number (0-7), "scalability": number (0-5) } },
+    "traction": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "revenue": number (0-8), "users": number (0-7), "growth_rate": number (0-5) } },
+    "deal": { "base": number (0-10, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "valuation": number (0-5), "terms": number (0-5) } },
     "communication": 0,
     "momentum": 0,
     "redFlags": 0
@@ -206,12 +206,47 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     // Reconcile currentScore with breakdown to ensure they add up
     if (parsed.scoreBreakdown) {
       const b = parsed.scoreBreakdown;
-      // Clamp each category base to its max
-      if (b.team) b.team.base = Math.max(0, Math.min(25, b.team.base || 0));
-      if (b.market) b.market.base = Math.max(0, Math.min(25, b.market.base || 0));
-      if (b.product) b.product.base = Math.max(0, Math.min(20, b.product.base || 0));
-      if (b.traction) b.traction.base = Math.max(0, Math.min(20, b.traction.base || 0));
-      if (b.deal) b.deal.base = Math.max(0, Math.min(10, b.deal.base || 0));
+
+      // Clamp subcriteria and recalculate base from subcriteria sum
+      if (b.team) {
+        const s = b.team.subcriteria || {};
+        s.experience = Math.max(0, Math.min(10, s.experience || 0));
+        s.domain_expertise = Math.max(0, Math.min(10, s.domain_expertise || 0));
+        s.execution_ability = Math.max(0, Math.min(5, s.execution_ability || 0));
+        b.team.subcriteria = s;
+        b.team.base = Math.max(0, Math.min(25, s.experience + s.domain_expertise + s.execution_ability));
+      }
+      if (b.market) {
+        const s = b.market.subcriteria || {};
+        s.size = Math.max(0, Math.min(10, s.size || 0));
+        s.growth = Math.max(0, Math.min(10, s.growth || 0));
+        s.timing = Math.max(0, Math.min(5, s.timing || 0));
+        b.market.subcriteria = s;
+        b.market.base = Math.max(0, Math.min(25, s.size + s.growth + s.timing));
+      }
+      if (b.product) {
+        const s = b.product.subcriteria || {};
+        s.innovation = Math.max(0, Math.min(8, s.innovation || 0));
+        s.defensibility = Math.max(0, Math.min(7, s.defensibility || 0));
+        s.scalability = Math.max(0, Math.min(5, s.scalability || 0));
+        b.product.subcriteria = s;
+        b.product.base = Math.max(0, Math.min(20, s.innovation + s.defensibility + s.scalability));
+      }
+      if (b.traction) {
+        const s = b.traction.subcriteria || {};
+        s.revenue = Math.max(0, Math.min(8, s.revenue || 0));
+        s.users = Math.max(0, Math.min(7, s.users || 0));
+        s.growth_rate = Math.max(0, Math.min(5, s.growth_rate || 0));
+        b.traction.subcriteria = s;
+        b.traction.base = Math.max(0, Math.min(20, s.revenue + s.users + s.growth_rate));
+      }
+      if (b.deal) {
+        const s = b.deal.subcriteria || {};
+        s.valuation = Math.max(0, Math.min(5, s.valuation || 0));
+        s.terms = Math.max(0, Math.min(5, s.terms || 0));
+        b.deal.subcriteria = s;
+        b.deal.base = Math.max(0, Math.min(10, s.valuation + s.terms));
+      }
 
       // Recalculate currentScore from the actual breakdown bases
       const calculatedScore = (b.team?.base || 0) + (b.market?.base || 0) + (b.product?.base || 0) + (b.traction?.base || 0) + (b.deal?.base || 0);
