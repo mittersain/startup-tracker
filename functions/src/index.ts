@@ -5983,9 +5983,12 @@ app.get('/startups/:id/analysis-history', authenticate, async (req: AuthRequest,
 
     emailsSnapshot.docs.forEach(doc => {
       const data = doc.data();
+      const emailDate = toISOString(data.date) || toISOString(data.createdAt) || new Date().toISOString();
+
       if (data.aiAnalysis) {
+        // Email with AI analysis
         timeline.push({
-          date: toISOString(data.date) || toISOString(data.createdAt) || new Date().toISOString(),
+          date: emailDate,
           type: data.direction === 'inbound' ? 'email_received' : 'email_sent',
           title: data.direction === 'inbound'
             ? `Founder response analyzed: ${data.subject || 'Email'}`
@@ -5993,6 +5996,17 @@ app.get('/startups/:id/analysis-history', authenticate, async (req: AuthRequest,
           details: data.aiAnalysis.recommendation
             ? `Recommendation: ${data.aiAnalysis.recommendation}${data.aiAnalysis.responseQuality?.score ? ` (Quality: ${data.aiAnalysis.responseQuality.score}/10)` : ''}`
             : `Email from ${data.from || 'founder'} analyzed`,
+          source: 'email',
+        });
+      } else {
+        // Email received/sent but not yet AI-analyzed
+        timeline.push({
+          date: emailDate,
+          type: data.direction === 'inbound' ? 'email_received' : 'email_sent',
+          title: data.direction === 'inbound'
+            ? `Email received: ${data.subject || 'Email'}`
+            : `Email sent: ${data.subject || 'Email'}`,
+          details: `From: ${data.from || 'unknown'}${data.hasAttachments ? ` (${data.attachmentCount || 1} attachment${(data.attachmentCount || 1) > 1 ? 's' : ''})` : ''}`,
           source: 'email',
         });
       }
@@ -6048,7 +6062,8 @@ app.get('/startups/:id/analysis-history', authenticate, async (req: AuthRequest,
       aiSummaryUpdatedAt: toISOString(startupData.aiSummary?.lastUpdated) || null,
       dataSources: {
         decks: decksSnapshot.docs.filter(d => d.data().aiAnalysis).length,
-        emails: emailsSnapshot.docs.filter(d => d.data().aiAnalysis).length,
+        emails: emailsSnapshot.docs.length,
+        emailsAnalyzed: emailsSnapshot.docs.filter(d => d.data().aiAnalysis).length,
         enrichment: startupData.enrichmentData?.enrichmentStatus === 'completed' ? 1 : 0,
       },
       timeline,

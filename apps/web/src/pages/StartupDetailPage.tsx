@@ -1078,7 +1078,12 @@ export default function StartupDetailPage() {
                     <Mail className="w-4 h-4 text-purple-600" />
                     <span className="text-lg font-bold text-purple-700">{analysisHistory.dataSources.emails}</span>
                   </div>
-                  <p className="text-xs text-purple-600 font-medium">Emails Analyzed</p>
+                  <p className="text-xs text-purple-600 font-medium">
+                    {analysisHistory.dataSources.emails === 1 ? 'Email' : 'Emails'}{' '}
+                    {analysisHistory.dataSources.emailsAnalyzed > 0
+                      ? `(${analysisHistory.dataSources.emailsAnalyzed} analyzed)`
+                      : ''}
+                  </p>
                 </div>
                 <div className="bg-emerald-50 rounded-lg p-3 text-center">
                   <div className="flex items-center justify-center gap-1.5 mb-1">
