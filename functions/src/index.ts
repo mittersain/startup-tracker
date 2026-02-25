@@ -5276,7 +5276,7 @@ async function analyzeDeckWithAI(deckId: string, fileBuffer: Buffer, fileName: s
 
     const prompt = `Analyze this startup pitch deck and provide a detailed analysis in this JSON format:
 {
-  "score": number (0-100, quality/investment potential score),
+  "score": number (0-100, MUST equal sum of all base scores below),
   "summary": string (2-3 sentence summary of the pitch),
   "strengths": string[] (3-5 key strengths),
   "weaknesses": string[] (3-5 areas for improvement),
@@ -5286,9 +5286,21 @@ async function analyzeDeckWithAI(deckId: string, fileBuffer: Buffer, fileName: s
     "growth": string or null (growth rate if mentioned),
     "funding": string or null (funding ask if mentioned)
   },
-  "recommendation": string (brief investment recommendation)
+  "recommendation": string (brief investment recommendation),
+  "scoreBreakdown": {
+    "team": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "experience": number (0-10), "domain_expertise": number (0-10), "execution_ability": number (0-5) } },
+    "market": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "size": number (0-10), "growth": number (0-10), "timing": number (0-5) } },
+    "product": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "innovation": number (0-8), "defensibility": number (0-7), "scalability": number (0-5) } },
+    "traction": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "revenue": number (0-8), "users": number (0-7), "growth_rate": number (0-5) } },
+    "deal": { "base": number (0-10, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "valuation": number (0-5), "terms": number (0-5) } },
+    "communication": 0,
+    "momentum": 0,
+    "redFlags": 0
+  }
 }
 
+CRITICAL: The "score" field MUST equal team.base + market.base + product.base + traction.base + deal.base.
+Each category "base" MUST equal the sum of its subcriteria.
 Respond with ONLY the JSON object.`;
 
     let result;
@@ -5318,6 +5330,57 @@ Respond with ONLY the JSON object.`;
     if (jsonMatch) {
       const analysis = JSON.parse(jsonMatch[0]);
 
+      // Reconcile breakdown scores if present
+      if (analysis.scoreBreakdown) {
+        const b = analysis.scoreBreakdown;
+
+        // Clamp subcriteria and recalculate base from subcriteria sum
+        if (b.team) {
+          const s = b.team.subcriteria || {};
+          s.experience = Math.max(0, Math.min(10, s.experience || 0));
+          s.domain_expertise = Math.max(0, Math.min(10, s.domain_expertise || 0));
+          s.execution_ability = Math.max(0, Math.min(5, s.execution_ability || 0));
+          b.team.subcriteria = s;
+          b.team.base = Math.max(0, Math.min(25, s.experience + s.domain_expertise + s.execution_ability));
+        }
+        if (b.market) {
+          const s = b.market.subcriteria || {};
+          s.size = Math.max(0, Math.min(10, s.size || 0));
+          s.growth = Math.max(0, Math.min(10, s.growth || 0));
+          s.timing = Math.max(0, Math.min(5, s.timing || 0));
+          b.market.subcriteria = s;
+          b.market.base = Math.max(0, Math.min(25, s.size + s.growth + s.timing));
+        }
+        if (b.product) {
+          const s = b.product.subcriteria || {};
+          s.innovation = Math.max(0, Math.min(8, s.innovation || 0));
+          s.defensibility = Math.max(0, Math.min(7, s.defensibility || 0));
+          s.scalability = Math.max(0, Math.min(5, s.scalability || 0));
+          b.product.subcriteria = s;
+          b.product.base = Math.max(0, Math.min(20, s.innovation + s.defensibility + s.scalability));
+        }
+        if (b.traction) {
+          const s = b.traction.subcriteria || {};
+          s.revenue = Math.max(0, Math.min(8, s.revenue || 0));
+          s.users = Math.max(0, Math.min(7, s.users || 0));
+          s.growth_rate = Math.max(0, Math.min(5, s.growth_rate || 0));
+          b.traction.subcriteria = s;
+          b.traction.base = Math.max(0, Math.min(20, s.revenue + s.users + s.growth_rate));
+        }
+        if (b.deal) {
+          const s = b.deal.subcriteria || {};
+          s.valuation = Math.max(0, Math.min(5, s.valuation || 0));
+          s.terms = Math.max(0, Math.min(5, s.terms || 0));
+          b.deal.subcriteria = s;
+          b.deal.base = Math.max(0, Math.min(10, s.valuation + s.terms));
+        }
+
+        // Recalculate total score from breakdown bases
+        analysis.score = Math.max(0, Math.min(100,
+          (b.team?.base || 0) + (b.market?.base || 0) + (b.product?.base || 0) + (b.traction?.base || 0) + (b.deal?.base || 0)
+        ));
+      }
+
       // Update deck with analysis
       await db.collection('decks').doc(deckId).update({
         aiAnalysis: analysis,
@@ -5331,14 +5394,21 @@ Respond with ONLY the JSON object.`;
         const startupDoc = await startupRef.get();
         if (startupDoc.exists) {
           const startupData = startupDoc.data()!;
-          const currentScore = startupData?.currentScore || 0;
-          // Average with existing score or use deck score
-          const newScore = currentScore > 0 ? Math.round((currentScore + analysis.score) / 2) : analysis.score;
-          await startupRef.update({
+          // Use the reconciled score directly (no more averaging with old mismatched score)
+          const newScore = analysis.score;
+          const updatePayload: Record<string, unknown> = {
             currentScore: newScore,
+            baseScore: newScore,
             deckScore: analysis.score,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          };
+
+          // Store breakdown if available
+          if (analysis.scoreBreakdown) {
+            updatePayload.scoreBreakdown = analysis.scoreBreakdown;
+          }
+
+          await startupRef.update(updatePayload);
 
           // Create score events based on analysis
           const scoreEvents: Array<{
