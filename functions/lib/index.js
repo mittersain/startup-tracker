@@ -44,6 +44,7 @@ const admin = __importStar(require("firebase-admin"));
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
+const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const bcrypt = __importStar(require("bcryptjs"));
 const jwt = __importStar(require("jsonwebtoken"));
 const imapflow_1 = require("imapflow");
@@ -51,6 +52,8 @@ const mailparser_1 = require("mailparser");
 const generative_ai_1 = require("@google/generative-ai");
 const busboy_1 = __importDefault(require("busboy"));
 const nodemailer = __importStar(require("nodemailer"));
+const sanitize_html_1 = __importDefault(require("sanitize-html"));
+const zod_1 = require("zod");
 // Initialize Gemini AI
 // Note: Using fallback for Firebase deployment compatibility, but functions will validate at runtime
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'PLACEHOLDER_KEY_SET_IN_PRODUCTION';
@@ -114,11 +117,11 @@ Provide your analysis as a JSON object with this exact structure:
 {
   "currentScore": number (0-100, overall investibility score),
   "scoreBreakdown": {
-    "team": { "base": number (0-25), "adjusted": 0, "subcriteria": { "experience": number, "domain_expertise": number, "execution_ability": number } },
-    "market": { "base": number (0-25), "adjusted": 0, "subcriteria": { "size": number, "growth": number, "timing": number } },
-    "product": { "base": number (0-20), "adjusted": 0, "subcriteria": { "innovation": number, "defensibility": number, "scalability": number } },
-    "traction": { "base": number (0-20), "adjusted": 0, "subcriteria": { "revenue": number, "users": number, "growth_rate": number } },
-    "deal": { "base": number (0-10), "adjusted": 0, "subcriteria": { "valuation": number, "terms": number } },
+    "team": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "experience": number (0-10), "domain_expertise": number (0-10), "execution_ability": number (0-5) } },
+    "market": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "size": number (0-10), "growth": number (0-10), "timing": number (0-5) } },
+    "product": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "innovation": number (0-8), "defensibility": number (0-7), "scalability": number (0-5) } },
+    "traction": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "revenue": number (0-8), "users": number (0-7), "growth_rate": number (0-5) } },
+    "deal": { "base": number (0-10, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "valuation": number (0-5), "terms": number (0-5) } },
     "communication": 0,
     "momentum": 0,
     "redFlags": 0
@@ -178,6 +181,53 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
             return null;
         }
         const parsed = JSON.parse(jsonMatch[0]);
+        // Reconcile currentScore with breakdown to ensure they add up
+        if (parsed.scoreBreakdown) {
+            const b = parsed.scoreBreakdown;
+            // Clamp subcriteria and recalculate base from subcriteria sum
+            if (b.team) {
+                const s = b.team.subcriteria || {};
+                s.experience = Math.max(0, Math.min(10, s.experience || 0));
+                s.domain_expertise = Math.max(0, Math.min(10, s.domain_expertise || 0));
+                s.execution_ability = Math.max(0, Math.min(5, s.execution_ability || 0));
+                b.team.subcriteria = s;
+                b.team.base = Math.max(0, Math.min(25, s.experience + s.domain_expertise + s.execution_ability));
+            }
+            if (b.market) {
+                const s = b.market.subcriteria || {};
+                s.size = Math.max(0, Math.min(10, s.size || 0));
+                s.growth = Math.max(0, Math.min(10, s.growth || 0));
+                s.timing = Math.max(0, Math.min(5, s.timing || 0));
+                b.market.subcriteria = s;
+                b.market.base = Math.max(0, Math.min(25, s.size + s.growth + s.timing));
+            }
+            if (b.product) {
+                const s = b.product.subcriteria || {};
+                s.innovation = Math.max(0, Math.min(8, s.innovation || 0));
+                s.defensibility = Math.max(0, Math.min(7, s.defensibility || 0));
+                s.scalability = Math.max(0, Math.min(5, s.scalability || 0));
+                b.product.subcriteria = s;
+                b.product.base = Math.max(0, Math.min(20, s.innovation + s.defensibility + s.scalability));
+            }
+            if (b.traction) {
+                const s = b.traction.subcriteria || {};
+                s.revenue = Math.max(0, Math.min(8, s.revenue || 0));
+                s.users = Math.max(0, Math.min(7, s.users || 0));
+                s.growth_rate = Math.max(0, Math.min(5, s.growth_rate || 0));
+                b.traction.subcriteria = s;
+                b.traction.base = Math.max(0, Math.min(20, s.revenue + s.users + s.growth_rate));
+            }
+            if (b.deal) {
+                const s = b.deal.subcriteria || {};
+                s.valuation = Math.max(0, Math.min(5, s.valuation || 0));
+                s.terms = Math.max(0, Math.min(5, s.terms || 0));
+                b.deal.subcriteria = s;
+                b.deal.base = Math.max(0, Math.min(10, s.valuation + s.terms));
+            }
+            // Recalculate currentScore from the actual breakdown bases
+            const calculatedScore = (b.team?.base || 0) + (b.market?.base || 0) + (b.product?.base || 0) + (b.traction?.base || 0) + (b.deal?.base || 0);
+            parsed.currentScore = Math.max(0, Math.min(100, Math.round(calculatedScore)));
+        }
         console.log(`[AI Analyze] Generated score ${parsed.currentScore} for ${startup.name}`);
         return parsed;
     }
@@ -187,31 +237,30 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     }
 }
 // AI Helper function to analyze founder response and generate follow-up
-async function analyzeFounderResponse(startupData, responseEmail, previousEmails) {
+async function analyzeFounderResponse(startupData, responseEmail, previousEmails, attachmentContext) {
     try {
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const conversationHistory = previousEmails
             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
             .map(e => `[${e.direction === 'inbound' ? 'Founder' : 'You'}]: ${e.subject}\n${e.body.substring(0, 500)}`)
             .join('\n\n---\n\n');
-        const prompt = `You are helping an individual angel investor evaluate a founder's email response. Be practical and direct.
+        const prompt = `You are helping an individual angel investor draft a reply to a founder's email.
+${attachmentContext ? `
+########## INVESTOR'S COMPLETE ANALYSIS OF THIS STARTUP ##########
+${attachmentContext}
+########## END OF ANALYSIS ##########
 
-STARTUP CONTEXT:
-- Name: ${startupData.name}
-- Stage: ${startupData.stage || 'Unknown'}
-- Description: ${startupData.description || 'Not provided'}
-- Current Score: ${startupData.currentScore || 'Not scored yet'}/100
-- Founder: ${startupData.founderName || 'Unknown'}
-
+IMPORTANT: The investor has ALREADY analyzed all pitch decks and documents. Use the analysis above to inform your reply. Reference specific details from the deck analysis (score, strengths, weaknesses) in your response.
+` : ''}
 PREVIOUS CONVERSATION:
 ${conversationHistory || 'No previous emails'}
 
-NEW FOUNDER RESPONSE:
+NEW EMAIL FROM FOUNDER:
 Subject: ${responseEmail.subject}
 From: ${responseEmail.from}
 Body: ${responseEmail.body}
 
-Analyze the founder's response and provide your assessment. Return ONLY a JSON object:
+Analyze and respond. Return ONLY a JSON object:
 
 {
   "responseQuality": {
@@ -244,14 +293,14 @@ RECOMMENDATION RULES (IMPORTANT):
 CRITICAL - draftReply MUST contain your questions in a NUMBERED LIST:
 - The draftReply field IS the email that will be sent to the founder
 - Format questions as a numbered list (1. 2. 3.) - NOT embedded in prose
-- Include a brief intro line, then list ALL follow-up questions clearly
-- Example format:
-  "Thanks for the details.
+- If pitch deck analysis is provided above, START by acknowledging something specific from the deck (a metric, strength, or concern)
+- Then list follow-up questions that dig deeper into areas identified in the deck analysis
+- Example format (when pitch deck was analyzed):
+  "Looked through the deck - the 40% MoM growth is solid. A few questions:
 
-  A few questions:
-  1. What's your current MRR and growth rate?
-  2. Is the team full-time?
-  3. How do you plan to use the funds?
+  1. How are you thinking about unit economics as you scale?
+  2. What's the CAC/LTV ratio currently?
+  3. Team seems lean - any key hires planned?
 
   - Nitish"
 
@@ -264,20 +313,380 @@ TONE GUIDELINES for draftReply:
 - Sound like a busy person who's interested but values their time
 - Use "I" not "we" - this is a personal investor
 - Sign off simply: "- Nitish" or just "Nitish"`;
+        // Log whether attachment context is being passed
+        console.log(`[AI Response Analysis] Has attachment context: ${!!attachmentContext}, length: ${attachmentContext?.length || 0}`);
+        if (attachmentContext) {
+            console.log(`[AI Response Analysis] Attachment context preview: ${attachmentContext.substring(0, 200)}...`);
+        }
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
+        // Log the AI's draft reply to see if it references attachments
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
             console.log('[AI Response Analysis] No JSON found in response');
             return null;
         }
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        console.log(`[AI Response Analysis] Draft reply preview: ${parsed.draftReply?.substring(0, 200)}...`);
+        return parsed;
     }
     catch (error) {
         console.error('[AI Response Analysis] Error:', error);
         return null;
     }
+}
+// Update the startup's persistent AI summary
+// This consolidates all analysis (deck, emails, research) into one summary
+async function updateStartupAISummary(startupId) {
+    try {
+        console.log(`[AI Summary] Updating summary for startup: ${startupId}`);
+        const startupDoc = await db.collection('startups').doc(startupId).get();
+        if (!startupDoc.exists) {
+            console.log(`[AI Summary] Startup not found: ${startupId}`);
+            return;
+        }
+        const startupData = startupDoc.data();
+        // Fetch all analyzed decks
+        const decksSnapshot = await db.collection('decks')
+            .where('startupId', '==', startupId)
+            .get();
+        const deckAnalyses = [];
+        let latestDeckScore = 0;
+        decksSnapshot.docs.forEach(doc => {
+            const data = doc.data();
+            if (data.aiAnalysis) {
+                const analysis = data.aiAnalysis;
+                latestDeckScore = analysis.score || latestDeckScore;
+                deckAnalyses.push(`
+DECK: ${data.fileName} (Score: ${analysis.score}/100)
+Summary: ${analysis.summary || 'N/A'}
+Strengths: ${(analysis.strengths || []).join('; ')}
+Weaknesses: ${(analysis.weaknesses || []).join('; ')}
+Recommendation: ${analysis.recommendation || 'N/A'}
+${analysis.keyMetrics ? `Key Metrics: TAM=${analysis.keyMetrics.tam || 'N/A'}, Revenue=${analysis.keyMetrics.revenue || 'N/A'}, Growth=${analysis.keyMetrics.growth || 'N/A'}` : ''}`);
+            }
+        });
+        // Fetch all emails for this startup
+        const emailsSnapshot = await db.collection('emails')
+            .where('startupId', '==', startupId)
+            .get();
+        // Sort emails by date and get summaries
+        const emailSummaries = [];
+        const sortedEmails = emailsSnapshot.docs
+            .map(doc => doc.data())
+            .sort((a, b) => {
+            const dateA = a.date?.toDate?.() || new Date(0);
+            const dateB = b.date?.toDate?.() || new Date(0);
+            return dateB.getTime() - dateA.getTime();
+        })
+            .slice(0, 10); // Last 10 emails
+        sortedEmails.forEach(email => {
+            const direction = email.direction === 'inbound' ? 'FROM FOUNDER' : 'TO FOUNDER';
+            const analysis = email.aiAnalysis;
+            let emailInfo = `[${direction}] ${email.subject || 'No subject'}`;
+            // Include brief body preview
+            const bodyPreview = (email.body || '').substring(0, 200).replace(/\n/g, ' ');
+            emailInfo += `\nPreview: ${bodyPreview}...`;
+            // Include AI analysis if available
+            if (analysis) {
+                emailInfo += `\nAI Analysis: Score ${analysis.responseQuality?.score || 'N/A'}/10, Recommendation: ${analysis.recommendation || 'N/A'}`;
+            }
+            emailSummaries.push(emailInfo);
+        });
+        // Build the consolidated AI summary
+        const aiSummary = {
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            deckScore: latestDeckScore,
+            deckCount: deckAnalyses.length,
+            emailCount: sortedEmails.length,
+            // Plain text summary for AI prompts
+            summary: `
+=== STARTUP: ${startupData.name} ===
+Current Score: ${startupData.currentScore || 'Not scored'}/100
+Stage: ${startupData.stage || 'Unknown'}
+Founder: ${startupData.founderName || 'Unknown'}
+Description: ${startupData.description || 'N/A'}
+
+${deckAnalyses.length > 0 ? `=== PITCH DECK ANALYSIS (ALREADY REVIEWED) ===
+${deckAnalyses.join('\n')}` : '=== NO PITCH DECK ANALYZED YET ==='}
+
+${emailSummaries.length > 0 ? `=== EMAIL CONVERSATION HISTORY ===
+${emailSummaries.join('\n\n')}` : '=== NO EMAILS YET ==='}
+`.trim()
+        };
+        // Update startup document
+        await db.collection('startups').doc(startupId).update({
+            aiSummary,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`[AI Summary] Updated summary for ${startupData.name}, deckCount: ${deckAnalyses.length}, emailCount: ${emailSummaries.length}`);
+    }
+    catch (error) {
+        console.error(`[AI Summary] Error updating summary for ${startupId}:`, error);
+    }
+}
+// ==================== UNIFIED SCORING FUNCTION ====================
+// Single source of truth for score calculation. ALL paths call this after storing their data.
+// It reads ALL data sources (decks, emails, enrichment, score events) and computes the score.
+async function recalculateStartupScore(startupId) {
+    console.log(`[RecalcScore] Starting score recalculation for startup: ${startupId}`);
+    // 1. Read the startup document
+    const startupRef = db.collection('startups').doc(startupId);
+    const startupDoc = await startupRef.get();
+    if (!startupDoc.exists) {
+        throw new Error(`Startup ${startupId} not found`);
+    }
+    const startupData = startupDoc.data();
+    // 2. Fetch the latest deck with AI analysis (source of base scores)
+    const decksSnapshot = await db.collection('decks')
+        .where('startupId', '==', startupId)
+        .where('status', '==', 'processed')
+        .orderBy('processedAt', 'desc')
+        .limit(1)
+        .get();
+    // 3. Fetch all emails with score adjustments
+    const emailsSnapshot = await db.collection('emails')
+        .where('startupId', '==', startupId)
+        .get();
+    // 4. Read enrichment data from startup doc
+    const enrichmentData = startupData.enrichmentData || null;
+    // 5. Read score events from subcollection
+    const scoreEventsSnapshot = await startupRef.collection('scoreEvents').get();
+    // ---- COMPUTE BASE SCORES ----
+    // Priority: latest deck analysis > startup's existing AI analysis > defaults
+    let baseBreakdown = {
+        team: { base: 0, adjusted: 0, subcriteria: {} },
+        market: { base: 0, adjusted: 0, subcriteria: {} },
+        product: { base: 0, adjusted: 0, subcriteria: {} },
+        traction: { base: 0, adjusted: 0, subcriteria: {} },
+        deal: { base: 0, adjusted: 0, subcriteria: {} },
+    };
+    let baseSource = 'none';
+    // Try deck analysis first (highest priority for base scores)
+    if (!decksSnapshot.empty) {
+        const latestDeck = decksSnapshot.docs[0].data();
+        const deckBreakdown = latestDeck.aiAnalysis?.scoreBreakdown;
+        if (deckBreakdown) {
+            baseSource = 'deck';
+            if (deckBreakdown.team) {
+                baseBreakdown.team = {
+                    base: deckBreakdown.team.base || 0,
+                    adjusted: 0,
+                    subcriteria: deckBreakdown.team.subcriteria || {},
+                };
+            }
+            if (deckBreakdown.market) {
+                baseBreakdown.market = {
+                    base: deckBreakdown.market.base || 0,
+                    adjusted: 0,
+                    subcriteria: deckBreakdown.market.subcriteria || {},
+                };
+            }
+            if (deckBreakdown.product) {
+                baseBreakdown.product = {
+                    base: deckBreakdown.product.base || 0,
+                    adjusted: 0,
+                    subcriteria: deckBreakdown.product.subcriteria || {},
+                };
+            }
+            if (deckBreakdown.traction) {
+                baseBreakdown.traction = {
+                    base: deckBreakdown.traction.base || 0,
+                    adjusted: 0,
+                    subcriteria: deckBreakdown.traction.subcriteria || {},
+                };
+            }
+            if (deckBreakdown.deal) {
+                baseBreakdown.deal = {
+                    base: deckBreakdown.deal.base || 0,
+                    adjusted: 0,
+                    subcriteria: deckBreakdown.deal.subcriteria || {},
+                };
+            }
+            console.log(`[RecalcScore] Base from deck analysis: team=${baseBreakdown.team.base}, market=${baseBreakdown.market.base}, product=${baseBreakdown.product.base}, traction=${baseBreakdown.traction.base}, deal=${baseBreakdown.deal.base}`);
+        }
+    }
+    // Fallback to startup's existing scoreBreakdown (from initial AI analysis)
+    if (baseSource === 'none' && startupData.scoreBreakdown) {
+        const sb = startupData.scoreBreakdown;
+        baseSource = 'ai_analysis';
+        for (const cat of ['team', 'market', 'product', 'traction', 'deal']) {
+            if (sb[cat]) {
+                baseBreakdown[cat] = {
+                    base: sb[cat].base || 0,
+                    adjusted: 0,
+                    subcriteria: sb[cat].subcriteria || {},
+                };
+            }
+        }
+        console.log(`[RecalcScore] Base from existing AI analysis`);
+    }
+    // ---- ACCUMULATE ADJUSTMENTS FROM EMAILS ----
+    let emailTeamAdj = 0;
+    let emailProductAdj = 0;
+    let emailTractionAdj = 0;
+    let emailCommunicationAdj = 0;
+    let emailMomentumAdj = 0;
+    emailsSnapshot.forEach((emailDoc) => {
+        const emailData = emailDoc.data();
+        // Check for scoreAdjustment in the email's AI analysis
+        const adj = emailData.aiAnalysis?.scoreAdjustment || emailData.scoreAdjustment;
+        if (adj) {
+            emailTeamAdj += adj.team || 0;
+            emailProductAdj += adj.product || 0;
+            emailTractionAdj += adj.traction || 0;
+            emailCommunicationAdj += adj.communication || 0;
+            emailMomentumAdj += adj.momentum || 0;
+        }
+    });
+    console.log(`[RecalcScore] Email adjustments: team=${emailTeamAdj}, product=${emailProductAdj}, traction=${emailTractionAdj}, comm=${emailCommunicationAdj}, momentum=${emailMomentumAdj}`);
+    // ---- ACCUMULATE ADJUSTMENTS FROM ENRICHMENT ----
+    let enrichTeamAdj = 0;
+    let enrichMarketAdj = 0;
+    let enrichTractionAdj = 0;
+    if (enrichmentData?.scoreImpact) {
+        enrichTeamAdj = enrichmentData.scoreImpact.teamAdjustment || 0;
+        enrichMarketAdj = enrichmentData.scoreImpact.marketAdjustment || 0;
+        enrichTractionAdj = enrichmentData.scoreImpact.tractionAdjustment || 0;
+        console.log(`[RecalcScore] Enrichment adjustments: team=${enrichTeamAdj}, market=${enrichMarketAdj}, traction=${enrichTractionAdj}`);
+    }
+    // ---- ACCUMULATE FROM SCORE EVENTS (subcollection) ----
+    let eventTeamAdj = 0;
+    let eventMarketAdj = 0;
+    let eventProductAdj = 0;
+    let eventTractionAdj = 0;
+    let eventDealAdj = 0;
+    let eventRedFlags = 0;
+    scoreEventsSnapshot.forEach((eventDoc) => {
+        const event = eventDoc.data();
+        const impact = event.impact || 0;
+        switch (event.category) {
+            case 'team':
+                eventTeamAdj += impact;
+                break;
+            case 'market':
+                eventMarketAdj += impact;
+                break;
+            case 'product':
+                eventProductAdj += impact;
+                break;
+            case 'traction':
+                eventTractionAdj += impact;
+                break;
+            case 'deal':
+                eventDealAdj += impact;
+                break;
+            case 'red_flag':
+                eventRedFlags += Math.abs(impact);
+                break;
+        }
+    });
+    // Also check top-level scoreEvents collection
+    const globalScoreEventsSnapshot = await db.collection('scoreEvents')
+        .where('startupId', '==', startupId)
+        .get();
+    globalScoreEventsSnapshot.forEach((eventDoc) => {
+        const event = eventDoc.data();
+        const impact = event.impact || 0;
+        switch (event.category) {
+            case 'team':
+                eventTeamAdj += impact;
+                break;
+            case 'market':
+                eventMarketAdj += impact;
+                break;
+            case 'product':
+                eventProductAdj += impact;
+                break;
+            case 'traction':
+                eventTractionAdj += impact;
+                break;
+            case 'deal':
+                eventDealAdj += impact;
+                break;
+            case 'red_flag':
+                eventRedFlags += Math.abs(impact);
+                break;
+        }
+    });
+    console.log(`[RecalcScore] Score event adjustments: team=${eventTeamAdj}, market=${eventMarketAdj}, product=${eventProductAdj}, traction=${eventTractionAdj}, deal=${eventDealAdj}, redFlags=${eventRedFlags}`);
+    // ---- COMBINE ALL ADJUSTMENTS ----
+    baseBreakdown.team.adjusted = emailTeamAdj + enrichTeamAdj + eventTeamAdj;
+    baseBreakdown.market.adjusted = enrichMarketAdj + eventMarketAdj;
+    baseBreakdown.product.adjusted = emailProductAdj + eventProductAdj;
+    baseBreakdown.traction.adjusted = emailTractionAdj + enrichTractionAdj + eventTractionAdj;
+    baseBreakdown.deal.adjusted = eventDealAdj;
+    // Clamp adjustments to reasonable bounds
+    for (const cat of ['team', 'market', 'product', 'traction', 'deal']) {
+        baseBreakdown[cat].adjusted = Math.max(-20, Math.min(20, baseBreakdown[cat].adjusted));
+    }
+    // Communication and momentum (from emails)
+    const communication = Math.max(0, Math.min(10, 5 + emailCommunicationAdj));
+    const momentum = Math.max(0, Math.min(10, 5 + emailMomentumAdj));
+    const redFlags = Math.min(30, eventRedFlags);
+    // ---- COMPUTE FINAL SCORE ----
+    const baseScore = baseBreakdown.team.base +
+        baseBreakdown.market.base +
+        baseBreakdown.product.base +
+        baseBreakdown.traction.base +
+        baseBreakdown.deal.base;
+    const adjustments = baseBreakdown.team.adjusted +
+        baseBreakdown.market.adjusted +
+        baseBreakdown.product.adjusted +
+        baseBreakdown.traction.adjusted +
+        baseBreakdown.deal.adjusted +
+        communication +
+        momentum -
+        redFlags;
+    // If we have NO base scores at all, just use the existing score or defaults
+    // (communication 5 + momentum 5 = 10 as a minimum)
+    const currentScore = baseScore > 0
+        ? Math.max(0, Math.min(100, Math.round(baseScore + adjustments)))
+        : (startupData.currentScore || 0);
+    // Build the full breakdown object for Firestore
+    const fullBreakdown = {
+        team: {
+            base: baseBreakdown.team.base,
+            adjusted: baseBreakdown.team.adjusted,
+            subcriteria: baseBreakdown.team.subcriteria || {},
+        },
+        market: {
+            base: baseBreakdown.market.base,
+            adjusted: baseBreakdown.market.adjusted,
+            subcriteria: baseBreakdown.market.subcriteria || {},
+        },
+        product: {
+            base: baseBreakdown.product.base,
+            adjusted: baseBreakdown.product.adjusted,
+            subcriteria: baseBreakdown.product.subcriteria || {},
+        },
+        traction: {
+            base: baseBreakdown.traction.base,
+            adjusted: baseBreakdown.traction.adjusted,
+            subcriteria: baseBreakdown.traction.subcriteria || {},
+        },
+        deal: {
+            base: baseBreakdown.deal.base,
+            adjusted: baseBreakdown.deal.adjusted,
+            subcriteria: baseBreakdown.deal.subcriteria || {},
+        },
+        communication,
+        momentum,
+        redFlags,
+    };
+    // ---- WRITE TO FIRESTORE ----
+    await startupRef.update({
+        currentScore,
+        baseScore,
+        scoreBreakdown: fullBreakdown,
+        scoreUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log(`[RecalcScore] Updated ${startupData.name}: score=${currentScore} (base=${baseScore}, adj=${Math.round(adjustments)}, comm=${communication}, mom=${momentum}, flags=-${redFlags}), source=${baseSource}`);
+    // Also update the consolidated AI summary
+    await updateStartupAISummary(startupId);
+    return { currentScore, breakdown: fullBreakdown };
 }
 // AI Helper function to analyze an attachment (pitch deck, document)
 async function analyzeAttachmentWithAI(fileName, mimeType, startupName) {
@@ -354,13 +763,163 @@ const db = admin.firestore();
 // JWT Secret (in production, use Secret Manager)
 // Note: Using fallback for Firebase deployment compatibility, validate in production
 const JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER_JWT_SECRET_SET_IN_PRODUCTION';
+// ==================== ROLE PERMISSIONS ====================
+const ROLE_PERMISSIONS = {
+    admin: {
+        canViewAllDeals: true,
+        canAddDeals: true,
+        canEditDeals: true,
+        canDeleteDeals: true,
+        canManageUsers: true,
+        canManageSettings: true,
+        canExportData: true,
+    },
+    partner: {
+        canViewAllDeals: true,
+        canAddDeals: true,
+        canEditDeals: true,
+        canDeleteDeals: false,
+        canManageUsers: false,
+        canManageSettings: false,
+        canExportData: true,
+    },
+    analyst: {
+        canViewAllDeals: false,
+        canAddDeals: true,
+        canEditDeals: false,
+        canDeleteDeals: false,
+        canManageUsers: false,
+        canManageSettings: false,
+        canExportData: false,
+    },
+    viewer: {
+        canViewAllDeals: false,
+        canAddDeals: false,
+        canEditDeals: false,
+        canDeleteDeals: false,
+        canManageUsers: false,
+        canManageSettings: false,
+        canExportData: false,
+    },
+};
+// ==================== ZOD VALIDATION SCHEMAS ====================
+// Comment validation schema
+const commentSchema = zod_1.z.object({
+    content: zod_1.z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+    parentId: zod_1.z.string().optional().nullable(),
+    mentions: zod_1.z.array(zod_1.z.string()).optional().default([]),
+});
+// Invite validation schema
+const inviteSchema = zod_1.z.object({
+    email: zod_1.z.string().email('Valid email is required'),
+    accessLevel: zod_1.z.enum(['view', 'comment'], { errorMap: () => ({ message: 'Access level must be view or comment' }) }),
+});
+// Co-investor comment validation schema
+const coInvestorCommentSchema = zod_1.z.object({
+    content: zod_1.z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+    name: zod_1.z.string().min(1, 'Name is required').max(100, 'Name is too long').optional(),
+});
+// HTML sanitization config - strip all HTML tags for plain text
+const sanitizeConfig = {
+    allowedTags: [],
+    allowedAttributes: {},
+    disallowedTagsMode: 'discard',
+};
+// Helper to sanitize user content
+function sanitizeContent(content) {
+    return (0, sanitize_html_1.default)(content, sanitizeConfig).trim();
+}
+// ==================== RESPONSE TRACKING ====================
+const RESPONSE_TIMEOUT_DAYS = 3;
+// Helper to compute if startup is awaiting founder response
+function computeAwaitingResponse(startup) {
+    // Only flag startups in 'reviewing' or 'due_diligence' status
+    if (startup.status !== 'reviewing' && startup.status !== 'due_diligence') {
+        return { isAwaitingResponse: false, daysSinceOutreach: null };
+    }
+    // No outbound email sent yet
+    if (!startup.lastEmailSentAt) {
+        return { isAwaitingResponse: false, daysSinceOutreach: null };
+    }
+    const sentAt = startup.lastEmailSentAt.toDate();
+    const now = new Date();
+    const daysSinceSent = Math.floor((now.getTime() - sentAt.getTime()) / (1000 * 60 * 60 * 24));
+    // Check if we received a response after sending
+    if (startup.lastEmailReceivedAt) {
+        const receivedAt = startup.lastEmailReceivedAt.toDate();
+        if (receivedAt > sentAt) {
+            // Response received after our last outreach
+            return { isAwaitingResponse: false, daysSinceOutreach: null };
+        }
+    }
+    // Check if timeout has passed
+    if (daysSinceSent >= RESPONSE_TIMEOUT_DAYS) {
+        return { isAwaitingResponse: true, daysSinceOutreach: daysSinceSent };
+    }
+    return { isAwaitingResponse: false, daysSinceOutreach: daysSinceSent };
+}
+// Helper to compute if startup has a new (unread) email from founder
+function computeHasNewResponse(startup) {
+    // No email received from founder
+    if (!startup.lastEmailReceivedAt) {
+        return { hasNewResponse: false, hoursSinceResponse: null };
+    }
+    const receivedAt = startup.lastEmailReceivedAt.toDate();
+    const now = new Date();
+    const hoursSinceReceived = Math.floor((now.getTime() - receivedAt.getTime()) / (1000 * 60 * 60));
+    // Check if user has already read this email
+    if (startup.lastResponseReadAt) {
+        const readAt = startup.lastResponseReadAt.toDate();
+        if (readAt >= receivedAt) {
+            // User has read the email
+            return { hasNewResponse: false, hoursSinceResponse: null };
+        }
+    }
+    // Check if we sent an email AFTER receiving this one (we've already responded)
+    if (startup.lastEmailSentAt) {
+        const sentAt = startup.lastEmailSentAt.toDate();
+        if (sentAt > receivedAt) {
+            // We already responded to this email, don't highlight
+            return { hasNewResponse: false, hoursSinceResponse: null };
+        }
+    }
+    // New unread email from founder - highlight it
+    return { hasNewResponse: true, hoursSinceResponse: hoursSinceReceived };
+}
 // Create Express app
 const app = (0, express_1.default)();
+// ==================== RATE LIMITING ====================
+// General rate limiter (100 requests per 15 minutes)
+const generalLimiter = (0, express_rate_limit_1.default)({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { error: 'Too many requests, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// Auth rate limiter (5 requests per minute - stricter for login/register)
+const authLimiter = (0, express_rate_limit_1.default)({
+    windowMs: 60 * 1000,
+    max: 5,
+    message: { error: 'Too many authentication attempts, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// Public endpoint rate limiter (for magic links - 20 per minute)
+const publicLimiter = (0, express_rate_limit_1.default)({
+    windowMs: 60 * 1000,
+    max: 20,
+    message: { error: 'Too many requests, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 // Middleware
 app.use((0, helmet_1.default)({ contentSecurityPolicy: false }));
 app.use((0, cors_1.default)({ origin: true, credentials: true }));
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ extended: true }));
+// Apply general rate limiting to all routes
+app.use(generalLimiter);
 // Health check
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString(), database: 'firestore', version: '2.0' });
@@ -371,7 +930,8 @@ app.use((req, _res, next) => {
     next();
 });
 // ==================== AUTH ROUTES ====================
-app.post('/auth/register', async (req, res) => {
+// Apply stricter rate limiting to auth endpoints
+app.post('/auth/register', authLimiter, async (req, res) => {
     try {
         const { email, password, name, organizationName } = req.body;
         if (!email || !password || !name || !organizationName) {
@@ -413,7 +973,7 @@ app.post('/auth/register', async (req, res) => {
         return res.status(500).json({ error: 'Registration failed' });
     }
 });
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/login', authLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
         const usersSnapshot = await db.collection('users').where('email', '==', email).get();
@@ -433,6 +993,7 @@ app.post('/auth/login', async (req, res) => {
             user: { id: userDoc.id, email: userData.email, name: userData.name, role: userData.role },
             organization: { id: orgDoc.id, name: orgData?.name },
             tokens: { accessToken, refreshToken: accessToken },
+            permissions: ROLE_PERMISSIONS[userData.role] || ROLE_PERMISSIONS.viewer,
         });
     }
     catch (error) {
@@ -500,6 +1061,16 @@ app.get('/startups', authenticate, async (req, res) => {
             .get();
         let startups = snapshot.docs.map(doc => {
             const data = doc.data();
+            const awaitingResponse = computeAwaitingResponse({
+                status: data.status,
+                lastEmailSentAt: data.lastEmailSentAt,
+                lastEmailReceivedAt: data.lastEmailReceivedAt,
+            });
+            const newResponse = computeHasNewResponse({
+                lastEmailSentAt: data.lastEmailSentAt,
+                lastEmailReceivedAt: data.lastEmailReceivedAt,
+                lastResponseReadAt: data.lastResponseReadAt,
+            });
             return {
                 id: doc.id,
                 name: data.name,
@@ -518,6 +1089,10 @@ app.get('/startups', authenticate, async (req, res) => {
                 organizationId: data.organizationId,
                 createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
                 updatedAt: data.updatedAt?.toDate?.()?.toISOString() || data.updatedAt,
+                isAwaitingResponse: awaitingResponse.isAwaitingResponse,
+                daysSinceOutreach: awaitingResponse.daysSinceOutreach,
+                hasNewResponse: newResponse.hasNewResponse,
+                hoursSinceResponse: newResponse.hoursSinceResponse,
             };
         });
         // Client-side filtering
@@ -640,6 +1215,16 @@ app.get('/startups/:id', authenticate, async (req, res) => {
             }
             return undefined;
         };
+        const awaitingResponse = computeAwaitingResponse({
+            status: data.status,
+            lastEmailSentAt: data.lastEmailSentAt,
+            lastEmailReceivedAt: data.lastEmailReceivedAt,
+        });
+        const newResponse = computeHasNewResponse({
+            lastEmailSentAt: data.lastEmailSentAt,
+            lastEmailReceivedAt: data.lastEmailReceivedAt,
+            lastResponseReadAt: data.lastResponseReadAt,
+        });
         return res.json({
             id: startupDoc.id,
             ...data,
@@ -650,6 +1235,10 @@ app.get('/startups/:id', authenticate, async (req, res) => {
             passedAt: toISOString(data.passedAt),
             snoozeEmailSentAt: toISOString(data.snoozeEmailSentAt),
             passEmailSentAt: toISOString(data.passEmailSentAt),
+            isAwaitingResponse: awaitingResponse.isAwaitingResponse,
+            daysSinceOutreach: awaitingResponse.daysSinceOutreach,
+            hasNewResponse: newResponse.hasNewResponse,
+            hoursSinceResponse: newResponse.hoursSinceResponse,
         });
     }
     catch (error) {
@@ -711,6 +1300,29 @@ app.patch('/startups/:id/status', authenticate, async (req, res) => {
     catch (error) {
         console.error('Update status error:', error);
         return res.status(500).json({ error: 'Failed to update status' });
+    }
+});
+// Mark founder response as read
+app.post('/startups/:id/mark-response-read', authenticate, async (req, res) => {
+    try {
+        const startupRef = db.collection('startups').doc(req.params.id);
+        const startupDoc = await startupRef.get();
+        if (!startupDoc.exists) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const data = startupDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        await startupRef.update({
+            lastResponseReadAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return res.json({ success: true });
+    }
+    catch (error) {
+        console.error('Mark response read error:', error);
+        return res.status(500).json({ error: 'Failed to mark response as read' });
     }
 });
 // Snooze a startup deal with reason and schedule follow-up
@@ -1006,17 +1618,24 @@ app.post('/startups/:id/chat', authenticate, async (req, res) => {
             const d = doc.data();
             return { role: d.role, content: d.content };
         });
-        // Build context about the startup
+        // Use the persistent AI summary if available, otherwise generate it
+        let aiSummary = startupData.aiSummary?.summary;
+        if (!aiSummary) {
+            console.log(`[Chat] No AI summary found for ${startupData.name}, generating now`);
+            await updateStartupAISummary(req.params.id);
+            const updatedDoc = await startupRef.get();
+            aiSummary = updatedDoc.data()?.aiSummary?.summary;
+        }
+        // Build context about the startup using the AI summary
         const startupContext = `
+${aiSummary || `
 Startup Information:
 - Name: ${startupData.name}
 - Status: ${startupData.status}
 - Stage: ${startupData.stage || 'Unknown'}
-- Sector: ${startupData.sector || 'Unknown'}
 - Description: ${startupData.description || 'No description'}
 - Current Score: ${startupData.currentScore ?? 'Not scored'}
-- Website: ${startupData.website || 'Not provided'}
-- Founder Email: ${startupData.founderEmail || 'Not provided'}
+`}
 
 ${startupData.businessModelAnalysis ? `
 Business Model Analysis:
@@ -1026,17 +1645,22 @@ Business Model Analysis:
 - Customer Segments: ${startupData.businessModelAnalysis.businessModel?.customerSegments?.join(', ') || 'Unknown'}
 - Market Size: ${startupData.businessModelAnalysis.marketAnalysis?.marketSize || 'Unknown'}
 - Competition: ${startupData.businessModelAnalysis.marketAnalysis?.competition || 'Unknown'}
-- Timing: ${startupData.businessModelAnalysis.marketAnalysis?.timing || 'Unknown'}
 - Strengths: ${startupData.businessModelAnalysis.strengths?.join('; ') || 'None identified'}
 - Concerns: ${startupData.businessModelAnalysis.concerns?.join('; ') || 'None identified'}
-- Key Questions: ${startupData.businessModelAnalysis.keyQuestions?.join('; ') || 'None'}
 ` : ''}
 
 ${startupData.snoozeReason ? `Snooze Reason: ${startupData.snoozeReason}` : ''}
 ${startupData.passReason ? `Pass Reason: ${startupData.passReason}` : ''}
 `;
-        // Generate AI response
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        // Generate AI response with Google Search grounding for real-time info
+        // Note: Gemini 2.0 requires 'google_search' instead of 'googleSearchRetrieval'
+        const model = genAI.getGenerativeModel({
+            model: 'gemini-2.0-flash',
+            tools: [{
+                    google_search: {}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                }],
+        });
         const systemPrompt = `You are an AI assistant helping an individual angel investor (NOT a VC fund) analyze startup investment opportunities. The investor makes personal investments, not through a fund.
 
 ${startupContext}
@@ -1045,6 +1669,7 @@ IMPORTANT CONTEXT:
 - The investor invests their own money personally, not through a fund
 - Use "you" and speak to them as an individual, not "your fund" or "your firm"
 - Keep advice practical for a personal investor's perspective
+- You have access to Google Search - use it to find websites, news, and other information about startups when needed
 
 You should:
 1. Provide thoughtful, practical analysis
@@ -1052,7 +1677,8 @@ You should:
 3. Suggest due diligence questions that a personal investor would ask
 4. Be direct and conversational - avoid corporate/VC jargon
 5. Keep responses concise and actionable
-6. If you don't have enough information, say so clearly
+6. When asked about websites, news, or public information - search the web to find it
+7. If information is in the startup context above, use that first before searching
 
 Previous conversation context is provided to maintain continuity.`;
         // Build the conversation for Gemini
@@ -1176,14 +1802,14 @@ If information not found, use null. Return ONLY valid JSON.`;
     }
 }
 // Helper: Search Crunchbase API
-async function fetchCrunchbaseData(companyName, website) {
+async function fetchCrunchbaseData(companyName, website, description) {
     try {
         // Crunchbase API key - you'll need to add this to your environment
         const CRUNCHBASE_API_KEY = process.env.CRUNCHBASE_API_KEY;
         if (!CRUNCHBASE_API_KEY) {
             console.log('[Enrichment] No Crunchbase API key configured');
             // Return mock/simulated data for now - will use AI to estimate
-            return await simulateCrunchbaseWithAI(companyName, website);
+            return await simulateCrunchbaseWithAI(companyName, website, description);
         }
         console.log(`[Enrichment] Fetching Crunchbase data for: ${companyName}`);
         // Search for the company
@@ -1195,12 +1821,12 @@ async function fetchCrunchbaseData(companyName, website) {
         });
         if (!searchResponse.ok) {
             console.log(`[Enrichment] Crunchbase search returned ${searchResponse.status}`);
-            return await simulateCrunchbaseWithAI(companyName, website);
+            return await simulateCrunchbaseWithAI(companyName, website, description);
         }
         const searchData = await searchResponse.json();
         if (!searchData.entities || searchData.entities.length === 0) {
             console.log('[Enrichment] No Crunchbase results found');
-            return await simulateCrunchbaseWithAI(companyName, website);
+            return await simulateCrunchbaseWithAI(companyName, website, description);
         }
         // Get the first matching organization
         const org = searchData.entities[0];
@@ -1213,7 +1839,7 @@ async function fetchCrunchbaseData(companyName, website) {
             },
         });
         if (!detailResponse.ok) {
-            return await simulateCrunchbaseWithAI(companyName, website);
+            return await simulateCrunchbaseWithAI(companyName, website, description);
         }
         const detailData = await detailResponse.json();
         const props = detailData.properties || {};
@@ -1243,15 +1869,20 @@ async function fetchCrunchbaseData(companyName, website) {
     }
     catch (error) {
         console.error('[Enrichment] Crunchbase fetch error:', error);
-        return await simulateCrunchbaseWithAI(companyName, website);
+        return await simulateCrunchbaseWithAI(companyName, website, description);
     }
 }
 // Helper: Use AI to estimate Crunchbase-like data when API not available
-async function simulateCrunchbaseWithAI(companyName, website) {
+async function simulateCrunchbaseWithAI(companyName, website, description) {
     try {
         console.log(`[Enrichment] Using AI to research: ${companyName}`);
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const prompt = `Research the startup "${companyName}"${website ? ` (website: ${website})` : ''} and provide available information.
+        // Add sector/description context if available
+        const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
+        const prompt = `Research the startup "${companyName}" (India-based startup).
+${website ? `Website: ${website}` : ''}${sectorHint}
+
+IMPORTANT: Focus on the INDIAN company in this specific sector, not international companies with similar names.
 
 Return ONLY a JSON object with what you know (use null for unknown fields):
 {
@@ -1263,10 +1894,11 @@ Return ONLY a JSON object with what you know (use null for unknown fields):
   "lastFundingType": "seed, series_a, series_b, etc or null",
   "categories": ["industry category"],
   "competitors": [{"name": "competitor name", "shortDescription": "what they do"}] (max 3),
-  "marketInsights": "brief market analysis"
+  "marketInsights": "brief market analysis",
+  "headquarters": "city, India"
 }
 
-Be conservative - only include information you're confident about.`;
+Be conservative - only include information you're confident about. Make sure to research the INDIAN company.`;
         const result = await model.generateContent(prompt);
         const responseText = result.response.text().trim();
         let jsonStr = responseText;
@@ -1343,12 +1975,17 @@ If you don't know any specific news, return an empty array [].`;
     }
 }
 // Helper: Fetch LinkedIn company data using AI research
-async function fetchLinkedInCompanyData(companyName, website, linkedInUrl) {
+async function fetchLinkedInCompanyData(companyName, website, linkedInUrl, description) {
     try {
         console.log(`[Enrichment] Fetching LinkedIn data for: ${companyName}`);
         // Use AI to research LinkedIn company information
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const prompt = `Research the LinkedIn company profile for "${companyName}"${website ? ` (website: ${website})` : ''}${linkedInUrl ? ` (LinkedIn: ${linkedInUrl})` : ''}.
+        // Add sector/description context if available
+        const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
+        const prompt = `Research the LinkedIn company profile for "${companyName}" (India-based startup).
+${website ? `Website: ${website}` : ''}${linkedInUrl ? `\nLinkedIn: ${linkedInUrl}` : ''}${sectorHint}
+
+IMPORTANT: Focus on the INDIAN company in this specific sector, not international companies with similar names.
 
 Based on publicly available information about this company's LinkedIn presence, provide:
 
@@ -1387,29 +2024,34 @@ Use your knowledge to provide accurate information. If you're uncertain about sp
     }
 }
 // Helper: Fetch LinkedIn founder/team data using AI research
-async function fetchLinkedInFounderData(companyName, founderNames, founderLinkedIns) {
+async function fetchLinkedInFounderData(companyName, founderNames, founderLinkedIns, description) {
     try {
         console.log(`[Enrichment] Fetching LinkedIn founder data for: ${companyName}`);
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const founderContext = founderNames && founderNames.length > 0
-            ? `Known founders: ${founderNames.join(', ')}`
+            ? `\nKNOWN FOUNDERS (YOU MUST USE THESE EXACT NAMES): ${founderNames.join(', ')}`
             : '';
         const linkedInContext = founderLinkedIns && founderLinkedIns.length > 0
-            ? `LinkedIn profiles: ${founderLinkedIns.join(', ')}`
+            ? `\nKnown LinkedIn profiles: ${founderLinkedIns.join(', ')}`
             : '';
-        const prompt = `Research the founders and key executives of "${companyName}".
-${founderContext}
-${linkedInContext}
+        // Add sector/description context if available
+        const sectorHint = description ? `\nCompany description: ${description.substring(0, 300)}` : '';
+        const prompt = `Research the founders and key executives of "${companyName}" (India-based startup).${founderContext}${linkedInContext}${sectorHint}
 
-Based on publicly available LinkedIn information, provide details about the founding team and key executives.
+CRITICAL INSTRUCTIONS:
+1. If founder names are provided above, YOU MUST USE THOSE EXACT NAMES - do NOT make up different names
+2. Focus on the INDIAN company in this sector, not international companies with similar names
+3. Provide LinkedIn profile URLs if you know them (format: https://www.linkedin.com/in/username/)
+4. If you don't know the LinkedIn URL, set linkedInUrl to null
 
-Return ONLY a JSON array with this structure:
+Return ONLY a valid JSON array with this structure (no other text):
 [
   {
     "name": "Full Name",
     "currentRole": "their role at ${companyName}",
-    "headline": "their LinkedIn headline",
-    "location": "city, country",
+    "linkedInUrl": "https://www.linkedin.com/in/their-profile-slug/" or null,
+    "headline": "their LinkedIn headline or brief description",
+    "location": "city, India",
     "previousCompanies": [
       {"name": "Company Name", "role": "Their role", "duration": "e.g., 2 years"}
     ],
@@ -1422,16 +2064,22 @@ Return ONLY a JSON array with this structure:
 ]
 
 Provide information for up to 3 key founders/executives. Use your knowledge to provide accurate information.
-If you're uncertain about specific details, omit those fields.
+If you're uncertain about specific details, omit those fields or use null.
 Focus on founders, CEOs, CTOs, and other C-level executives.`;
         const result = await model.generateContent(prompt);
         const responseText = result.response.text().trim();
+        console.log(`[Enrichment] Founder data response length: ${responseText.length}`);
         let jsonStr = responseText;
         if (jsonStr.startsWith('```')) {
             jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```$/g, '').trim();
         }
+        // Try to extract JSON array if there's extra text
+        const jsonMatch = jsonStr.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+            jsonStr = jsonMatch[0];
+        }
         const founders = JSON.parse(jsonStr);
-        // Attach LinkedIn URLs if provided
+        // Override with provided LinkedIn URLs if available (these are known to be correct)
         if (founderLinkedIns && founders) {
             founders.forEach((founder, idx) => {
                 if (founderLinkedIns[idx]) {
@@ -1439,6 +2087,7 @@ Focus on founders, CEOs, CTOs, and other C-level executives.`;
                 }
             });
         }
+        console.log(`[Enrichment] Parsed ${founders?.length || 0} founders`);
         return founders && founders.length > 0 ? founders : null;
     }
     catch (error) {
@@ -1618,7 +2267,7 @@ async function enrichStartup(startupId, startupData) {
         // Run all enrichment tasks in parallel (Phase 1: Basic data)
         const [websiteData, crunchbaseData, newsData] = await Promise.all([
             startupData.website ? scrapeWebsite(startupData.website) : Promise.resolve(null),
-            fetchCrunchbaseData(startupData.name, startupData.website),
+            fetchCrunchbaseData(startupData.name, startupData.website, startupData.description),
             fetchGoogleNews(startupData.name),
         ]);
         if (websiteData)
@@ -1634,8 +2283,8 @@ async function enrichStartup(startupId, startupData) {
             crunchbaseData?.founders?.map(f => f.name);
         // Run LinkedIn enrichment in parallel
         const [linkedinCompanyData, linkedinFounderData] = await Promise.all([
-            fetchLinkedInCompanyData(startupData.name, startupData.website, effectiveLinkedInUrl),
-            fetchLinkedInFounderData(startupData.name, effectiveFounderNames, founderLinkedIns),
+            fetchLinkedInCompanyData(startupData.name, startupData.website, effectiveLinkedInUrl, startupData.description),
+            fetchLinkedInFounderData(startupData.name, effectiveFounderNames, founderLinkedIns, startupData.description),
         ]);
         if (linkedinCompanyData)
             enrichmentData.linkedin = linkedinCompanyData;
@@ -1704,9 +2353,8 @@ async function enrichStartup(startupId, startupData) {
                 updateData.twitterUrl = crunchbaseData.twitterUrl;
             }
         }
-        // Apply score adjustments
+        // Store score events for enrichment findings (recalculate will read these)
         if (scoreImpact.signals.length > 0) {
-            // Create score events for enrichment findings
             const batch = db.batch();
             for (const signal of scoreImpact.signals) {
                 const eventRef = db.collection('scoreEvents').doc();
@@ -1724,27 +2372,12 @@ async function enrichStartup(startupId, startupData) {
                 });
             }
             await batch.commit();
-            // Update score breakdown
-            const currentBreakdown = startupData.scoreBreakdown || {};
-            if (currentBreakdown.team) {
-                currentBreakdown.team.adjusted = (currentBreakdown.team.adjusted || 0) + scoreImpact.teamAdjustment;
-            }
-            if (currentBreakdown.market) {
-                currentBreakdown.market.adjusted = (currentBreakdown.market.adjusted || 0) + scoreImpact.marketAdjustment;
-            }
-            if (currentBreakdown.traction) {
-                currentBreakdown.traction.adjusted = (currentBreakdown.traction.adjusted || 0) + scoreImpact.tractionAdjustment;
-            }
-            updateData.scoreBreakdown = currentBreakdown;
-            // Recalculate total score
-            const totalAdjustment = scoreImpact.teamAdjustment + scoreImpact.marketAdjustment + scoreImpact.tractionAdjustment;
-            if (typeof startupData.currentScore === 'number') {
-                updateData.currentScore = Math.min(100, Math.max(0, startupData.currentScore + totalAdjustment));
-            }
         }
         enrichmentData.enrichmentStatus = 'completed';
         updateData.enrichmentData = enrichmentData;
         await startupRef.update(updateData);
+        // Unified score recalculation from ALL data sources
+        await recalculateStartupScore(startupId);
         console.log(`[Enrichment] Completed enrichment for: ${startupData.name}`);
         return enrichmentData;
     }
@@ -2086,28 +2719,179 @@ app.post('/startups/:id/analyze', authenticate, async (req, res) => {
         if (!aiAnalysis) {
             return res.status(500).json({ error: 'AI analysis failed' });
         }
-        // Update startup with AI analysis
+        // Store AI analysis data (non-score fields) on the startup doc
         await startupRef.update({
-            currentScore: aiAnalysis.currentScore,
-            baseScore: aiAnalysis.currentScore,
-            scoreBreakdown: aiAnalysis.scoreBreakdown,
             businessModelAnalysis: aiAnalysis.businessModelAnalysis,
             sector: aiAnalysis.businessModelAnalysis?.sector,
             draftReply: aiAnalysis.draftReply,
             draftReplyStatus: data.draftReplyStatus || 'pending',
-            scoreUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            // Store the AI's breakdown as the base for recalculation
+            scoreBreakdown: aiAnalysis.scoreBreakdown,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`[Analyze] AI analysis complete. Score: ${aiAnalysis.currentScore}`);
+        // Unified score recalculation from ALL data sources
+        const { currentScore } = await recalculateStartupScore(req.params.id);
+        console.log(`[Analyze] AI analysis complete. Score: ${currentScore}`);
         return res.json({
             success: true,
-            score: aiAnalysis.currentScore,
+            score: currentScore,
             sector: aiAnalysis.businessModelAnalysis?.sector,
         });
     }
     catch (error) {
         console.error('Analyze startup error:', error);
         return res.status(500).json({ error: 'Failed to analyze startup' });
+    }
+});
+// Generate Investment Memo for co-investor circulation
+app.post('/startups/:id/generate-memo', authenticate, async (req, res) => {
+    try {
+        const startupRef = db.collection('startups').doc(req.params.id);
+        const startupDoc = await startupRef.get();
+        if (!startupDoc.exists) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const startup = startupDoc.data();
+        if (startup.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        console.log(`[Investment Memo] Generating memo for ${startup.name}...`);
+        // Fetch all relevant data for the memo
+        const [decksSnapshot, enrichmentData] = await Promise.all([
+            db.collection('decks').where('startupId', '==', req.params.id).get(),
+            Promise.resolve(startup.enrichmentData || {}),
+        ]);
+        // Get deck analyses
+        const deckAnalyses = decksSnapshot.docs
+            .filter(doc => doc.data().aiAnalysis)
+            .map(doc => {
+            const d = doc.data();
+            return {
+                fileName: d.fileName,
+                score: d.aiAnalysis?.score,
+                summary: d.aiAnalysis?.summary,
+                strengths: d.aiAnalysis?.strengths,
+                weaknesses: d.aiAnalysis?.weaknesses,
+                keyMetrics: d.aiAnalysis?.keyMetrics,
+                businessModel: d.aiAnalysis?.businessModel,
+            };
+        });
+        // Build comprehensive context
+        const businessAnalysis = startup.businessModelAnalysis || {};
+        const scoreBreakdown = startup.scoreBreakdown || {};
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const prompt = `You are a venture capital analyst creating a professional Investment Memo to share with potential co-investors.
+
+Generate a concise but comprehensive Investment Memo for the following startup:
+
+=== STARTUP INFORMATION ===
+Company Name: ${startup.name}
+Sector: ${businessAnalysis.sector || startup.sector || 'Not specified'}
+Stage: ${startup.stage || businessAnalysis.stage || 'Not specified'}
+Founder: ${startup.founderName || 'Not specified'}
+Website: ${startup.website || 'Not specified'}
+Description: ${startup.description || 'Not specified'}
+
+=== AI SCORE ===
+Overall Score: ${startup.currentScore || 'Not scored'}/100
+Score Breakdown:
+- Team: ${scoreBreakdown.team?.score || 'N/A'}/100 - ${scoreBreakdown.team?.reasoning || ''}
+- Market: ${scoreBreakdown.market?.score || 'N/A'}/100 - ${scoreBreakdown.market?.reasoning || ''}
+- Product: ${scoreBreakdown.product?.score || 'N/A'}/100 - ${scoreBreakdown.product?.reasoning || ''}
+- Traction: ${scoreBreakdown.traction?.score || 'N/A'}/100 - ${scoreBreakdown.traction?.reasoning || ''}
+- Deal: ${scoreBreakdown.deal?.score || 'N/A'}/100 - ${scoreBreakdown.deal?.reasoning || ''}
+
+=== BUSINESS MODEL ===
+Type: ${businessAnalysis.businessModel?.type || 'Not specified'}
+Value Proposition: ${businessAnalysis.businessModel?.valueProposition || 'Not specified'}
+Revenue Streams: ${(businessAnalysis.businessModel?.revenueStreams || []).join(', ') || 'Not specified'}
+Customer Segments: ${(businessAnalysis.businessModel?.customerSegments || []).join(', ') || 'Not specified'}
+
+=== MARKET ANALYSIS ===
+Market Size: ${businessAnalysis.marketAnalysis?.marketSize || 'Not specified'}
+Competition: ${businessAnalysis.marketAnalysis?.competition || 'Not specified'}
+Timing: ${businessAnalysis.marketAnalysis?.timing || 'Not specified'}
+
+=== STRENGTHS ===
+${(businessAnalysis.strengths || []).map((s) => `- ${s}`).join('\n') || 'Not analyzed'}
+
+=== CONCERNS ===
+${(businessAnalysis.concerns || []).map((c) => `- ${c}`).join('\n') || 'Not analyzed'}
+
+=== PITCH DECK ANALYSIS ===
+${deckAnalyses.length > 0 ? deckAnalyses.map(d => `
+Deck: ${d.fileName}
+Score: ${d.score}/100
+Summary: ${d.summary || 'N/A'}
+Key Metrics: ${JSON.stringify(d.keyMetrics || {})}
+Strengths: ${(d.strengths || []).join(', ')}
+Weaknesses: ${(d.weaknesses || []).join(', ')}
+`).join('\n') : 'No pitch deck analyzed'}
+
+=== ENRICHMENT DATA ===
+${enrichmentData.crunchbase ? `
+Crunchbase:
+- Founded: ${enrichmentData.crunchbase.foundedOn || 'Unknown'}
+- Employees: ${enrichmentData.crunchbase.numEmployeesEnum || 'Unknown'}
+- Total Funding: ${enrichmentData.crunchbase.totalFundingUsd ? '$' + (enrichmentData.crunchbase.totalFundingUsd / 1000000).toFixed(1) + 'M' : 'Unknown'}
+- Last Round: ${enrichmentData.crunchbase.lastFundingType || 'Unknown'}
+` : ''}
+${enrichmentData.linkedin ? `
+LinkedIn:
+- Industry: ${enrichmentData.linkedin.industry || 'Unknown'}
+- Company Size: ${enrichmentData.linkedin.companySize || 'Unknown'}
+- Headquarters: ${enrichmentData.linkedin.headquarters || 'Unknown'}
+` : ''}
+
+---
+
+Create an Investment Memo with the following sections. Be professional, concise, and data-driven:
+
+1. **EXECUTIVE SUMMARY** (2-3 sentences overview of the opportunity)
+
+2. **COMPANY OVERVIEW**
+   - What they do
+   - Business model
+   - Target market
+
+3. **INVESTMENT THESIS** (3-5 bullet points on why this is an attractive investment)
+
+4. **KEY METRICS & TRACTION** (highlight any numbers from deck or description)
+
+5. **TEAM ASSESSMENT** (founder background, team strengths)
+
+6. **MARKET OPPORTUNITY** (TAM/SAM/SOM if available, market timing)
+
+7. **COMPETITIVE LANDSCAPE** (key competitors, differentiation)
+
+8. **RISKS & CONCERNS** (be honest about challenges)
+
+9. **INVESTMENT TERMS** (if known - round size, valuation, etc.)
+
+10. **RECOMMENDATION** (clear investment recommendation with reasoning)
+
+Format the output as clean markdown that can be easily shared with co-investors.`;
+        const result = await model.generateContent(prompt);
+        const memo = result.response.text().trim();
+        console.log(`[Investment Memo] Generated memo for ${startup.name}, length: ${memo.length}`);
+        // Optionally save the memo to the startup
+        await startupRef.update({
+            investmentMemo: {
+                content: memo,
+                generatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                generatedBy: req.user.userId,
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return res.json({
+            success: true,
+            memo,
+            generatedAt: new Date().toISOString(),
+        });
+    }
+    catch (error) {
+        console.error('[Investment Memo] Error:', error);
+        return res.status(500).json({ error: 'Failed to generate investment memo' });
     }
 });
 app.delete('/startups/:id', authenticate, async (req, res) => {
@@ -2409,60 +3193,9 @@ app.post('/inbox/sync', authenticate, async (req, res) => {
                                 draftReply: responseAnalysis?.draftReply || null,
                                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                             });
-                            // Update startup score based on AI analysis
-                            if (responseAnalysis && responseAnalysis.scoreAdjustment) {
-                                const adj = responseAnalysis.scoreAdjustment;
-                                const currentBreakdown = startupData.scoreBreakdown || {};
-                                // Calculate score adjustments
-                                const communicationAdj = adj.communication || 0;
-                                const teamAdj = adj.team || 0;
-                                const productAdj = adj.product || 0;
-                                const tractionAdj = adj.traction || 0;
-                                const momentumAdj = adj.momentum || 0;
-                                // Update score breakdown
-                                const newBreakdown = {
-                                    ...currentBreakdown,
-                                    communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
-                                    momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
-                                    team: currentBreakdown.team ? {
-                                        ...currentBreakdown.team,
-                                        adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
-                                    } : currentBreakdown.team,
-                                    product: currentBreakdown.product ? {
-                                        ...currentBreakdown.product,
-                                        adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
-                                    } : currentBreakdown.product,
-                                    traction: currentBreakdown.traction ? {
-                                        ...currentBreakdown.traction,
-                                        adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
-                                    } : currentBreakdown.traction,
-                                };
-                                // Recalculate total score
-                                const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
-                                const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
-                                const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
-                                const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
-                                const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
-                                const commScore = newBreakdown.communication || 5;
-                                const momScore = newBreakdown.momentum || 5;
-                                const redFlags = newBreakdown.redFlags || 0;
-                                const newTotalScore = Math.round(teamScore + marketScore + productScore + tractionScore + dealScore +
-                                    commScore + momScore - redFlags);
-                                // Record score event
-                                await db.collection('startups').doc(startupDoc.id).collection('scoreEvents').add({
-                                    previousScore: startupData.currentScore || 0,
-                                    newScore: newTotalScore,
-                                    change: newTotalScore - (startupData.currentScore || 0),
-                                    reason: `Founder response analyzed: ${adj.reasoning}`,
-                                    source: 'founder_response',
-                                    aiAnalysis: responseAnalysis.responseQuality,
-                                    recommendation: responseAnalysis.recommendation,
-                                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                                });
-                                // Update startup with new score and draft reply
+                            // Store email analysis metadata on startup (non-score fields)
+                            if (responseAnalysis) {
                                 await startupDoc.ref.update({
-                                    currentScore: newTotalScore,
-                                    scoreBreakdown: newBreakdown,
                                     lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
                                     lastResponseAnalysis: {
                                         quality: responseAnalysis.responseQuality,
@@ -2474,7 +3207,18 @@ app.post('/inbox/sync', authenticate, async (req, res) => {
                                     },
                                     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                                 });
-                                console.log(`[EmailSync] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore} (${adj.reasoning})`);
+                                // Record score event for history
+                                if (responseAnalysis.scoreAdjustment) {
+                                    const adj = responseAnalysis.scoreAdjustment;
+                                    await db.collection('startups').doc(startupDoc.id).collection('scoreEvents').add({
+                                        previousScore: startupData.currentScore || 0,
+                                        reason: `Founder response analyzed: ${adj.reasoning}`,
+                                        source: 'founder_response',
+                                        aiAnalysis: responseAnalysis.responseQuality,
+                                        recommendation: responseAnalysis.recommendation,
+                                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                                    });
+                                }
                             }
                             else {
                                 // Just update last contact date if no AI analysis
@@ -2483,6 +3227,8 @@ app.post('/inbox/sync', authenticate, async (req, res) => {
                                     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                                 });
                             }
+                            // Unified score recalculation from ALL data sources
+                            await recalculateStartupScore(startupDoc.id);
                             console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}${responseAnalysis ? ` - AI recommends: ${responseAnalysis.recommendation}` : ''}`);
                             processed++;
                             results.push({
@@ -3038,19 +3784,17 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req, res) => {
             hasAttachments: proposalData.hasAttachments || false,
             attachmentCount: proposalData.attachments?.length || 0,
             firstEmailDate: proposalData.emailDate || admin.firestore.FieldValue.serverTimestamp(),
+            lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(), // Track for new response highlighting
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         };
-        // Add AI analysis results if available
+        // Add AI analysis results if available (store data, NOT scores - recalculate will handle scoring)
         if (aiAnalysis) {
-            startupData.currentScore = combinedScore;
-            startupData.baseScore = combinedScore;
             startupData.emailScore = aiAnalysis.currentScore;
             startupData.scoreBreakdown = aiAnalysis.scoreBreakdown;
             startupData.businessModelAnalysis = aiAnalysis.businessModelAnalysis;
             startupData.sector = aiAnalysis.businessModelAnalysis?.sector;
             startupData.draftReplyStatus = 'pending';
-            startupData.scoreUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
             // Add attachment analysis insights to key questions
             if (attachmentAnalyses.length > 0) {
                 // Update draft reply to include attachment-informed questions
@@ -3062,9 +3806,11 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req, res) => {
             else {
                 startupData.draftReply = aiAnalysis.draftReply;
             }
-            console.log(`[Approve] AI analysis complete. Combined Score: ${combinedScore}`);
+            console.log(`[Approve] AI analysis complete.`);
         }
         await startupRef.set(startupData);
+        // Unified score recalculation from ALL data sources
+        await recalculateStartupScore(startupRef.id);
         // Create score events if AI analysis was performed
         if (aiAnalysis) {
             const scoreEvents = [];
@@ -3583,8 +4329,16 @@ app.post('/emails/:emailId/analyze', authenticate, async (req, res) => {
         })
             .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()) // Sort in memory
             .slice(0, 10); // Limit to 10
+        // Use the startup's persistent AI summary
+        let aiSummary = startupData.aiSummary?.summary;
+        if (!aiSummary) {
+            console.log(`[Re-analyze] No AI summary found, generating for ${startupId}`);
+            await updateStartupAISummary(startupId);
+            const updatedDoc = await db.collection('startups').doc(startupId).get();
+            aiSummary = updatedDoc.data()?.aiSummary?.summary;
+        }
         // Analyze the founder response
-        console.log(`[Re-analyze] Analyzing email ${emailId} for startup: ${startupData.name}`);
+        console.log(`[Re-analyze] Analyzing email ${emailId} for startup: ${startupData.name}, hasSummary: ${!!aiSummary}`);
         const responseAnalysis = await analyzeFounderResponse({
             name: startupData.name,
             description: startupData.description,
@@ -3597,7 +4351,7 @@ app.post('/emails/:emailId/analyze', authenticate, async (req, res) => {
             subject: emailData.subject || '',
             body: emailData.body || '',
             from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
-        }, previousEmails);
+        }, previousEmails, aiSummary || undefined);
         if (!responseAnalysis) {
             return res.status(500).json({ error: 'Failed to analyze email' });
         }
@@ -3613,50 +4367,12 @@ app.post('/emails/:emailId/analyze', authenticate, async (req, res) => {
             draftReply: responseAnalysis.draftReply,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        // Update startup score based on AI analysis
+        // Store analysis metadata on startup (non-score fields)
         if (responseAnalysis.scoreAdjustment) {
             const adj = responseAnalysis.scoreAdjustment;
-            const currentBreakdown = startupData.scoreBreakdown || {};
-            // Calculate score adjustments
-            const communicationAdj = adj.communication || 0;
-            const teamAdj = adj.team || 0;
-            const productAdj = adj.product || 0;
-            const tractionAdj = adj.traction || 0;
-            const momentumAdj = adj.momentum || 0;
-            // Update score breakdown
-            const newBreakdown = {
-                ...currentBreakdown,
-                communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
-                momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
-                team: currentBreakdown.team ? {
-                    ...currentBreakdown.team,
-                    adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
-                } : currentBreakdown.team,
-                product: currentBreakdown.product ? {
-                    ...currentBreakdown.product,
-                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
-                } : currentBreakdown.product,
-                traction: currentBreakdown.traction ? {
-                    ...currentBreakdown.traction,
-                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
-                } : currentBreakdown.traction,
-            };
-            // Recalculate total score
-            const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
-            const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
-            const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
-            const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
-            const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
-            const commScore = newBreakdown.communication || 5;
-            const momScore = newBreakdown.momentum || 5;
-            const redFlags = newBreakdown.redFlags || 0;
-            const newTotalScore = Math.round(teamScore + marketScore + productScore + tractionScore + dealScore +
-                commScore + momScore - redFlags);
-            // Record score event
+            // Record score event for history tracking
             await db.collection('startups').doc(startupId).collection('scoreEvents').add({
                 previousScore: startupData.currentScore || 0,
-                newScore: newTotalScore,
-                change: newTotalScore - (startupData.currentScore || 0),
                 reason: `Email re-analyzed: ${adj.reasoning}`,
                 source: 'email_reanalysis',
                 emailId: emailId,
@@ -3664,22 +4380,21 @@ app.post('/emails/:emailId/analyze', authenticate, async (req, res) => {
                 recommendation: responseAnalysis.recommendation,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
             });
-            // Update startup with new score and draft reply
-            await startupDoc.ref.update({
-                currentScore: newTotalScore,
-                scoreBreakdown: newBreakdown,
-                lastResponseAnalysis: {
-                    quality: responseAnalysis.responseQuality,
-                    recommendation: responseAnalysis.recommendation,
-                    recommendationReason: responseAnalysis.recommendationReason,
-                    suggestedQuestions: responseAnalysis.suggestedQuestions,
-                    draftReply: responseAnalysis.draftReply,
-                    analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
-                },
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-            console.log(`[Re-analyze] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore}`);
         }
+        // Update startup with response analysis metadata
+        await startupDoc.ref.update({
+            lastResponseAnalysis: {
+                quality: responseAnalysis.responseQuality,
+                recommendation: responseAnalysis.recommendation,
+                recommendationReason: responseAnalysis.recommendationReason,
+                suggestedQuestions: responseAnalysis.suggestedQuestions,
+                draftReply: responseAnalysis.draftReply,
+                analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // Unified score recalculation from ALL data sources (also updates AI summary)
+        await recalculateStartupScore(startupId);
         return res.json({
             success: true,
             analysis: {
@@ -3742,8 +4457,41 @@ app.post('/emails/:emailId/generate-reply', authenticate, async (req, res) => {
             .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
         // Previous emails excludes the current one
         const previousEmails = allEmails.filter(e => e.id !== emailId).slice(0, 10);
-        // Generate AI reply
-        console.log(`[Generate Reply] Generating reply for email ${emailId}, startup: ${startupData.name}`);
+        // ALWAYS refresh the AI summary to get latest deck analysis
+        console.log(`[Generate Reply] Refreshing AI summary for ${startupId}`);
+        await updateStartupAISummary(startupId);
+        // Re-fetch the startup to get the fresh summary
+        const refreshedStartupDoc = await db.collection('startups').doc(startupId).get();
+        let aiSummary = refreshedStartupDoc.data()?.aiSummary?.summary || '';
+        // If summary is empty or doesn't include deck analysis, directly fetch deck analyses
+        if (!aiSummary || aiSummary.includes('NO PITCH DECK ANALYZED YET') || !aiSummary.includes('PITCH DECK')) {
+            console.log(`[Generate Reply] Summary missing deck analysis, fetching decks directly`);
+            const decksSnapshot = await db.collection('decks')
+                .where('startupId', '==', startupId)
+                .get();
+            if (!decksSnapshot.empty) {
+                const deckAnalyses = decksSnapshot.docs
+                    .filter(doc => doc.data().aiAnalysis)
+                    .map(doc => {
+                    const d = doc.data();
+                    const analysis = d.aiAnalysis;
+                    return `Deck: ${d.fileName}
+Score: ${analysis.score}/100
+Summary: ${analysis.summary || 'N/A'}
+Strengths: ${analysis.strengths?.join(', ') || 'N/A'}
+Weaknesses: ${analysis.weaknesses?.join(', ') || 'N/A'}
+Business Model: ${analysis.businessModel || 'N/A'}
+Key Metrics: ${JSON.stringify(analysis.keyMetrics || {})}`;
+                })
+                    .join('\n\n');
+                if (deckAnalyses) {
+                    console.log(`[Generate Reply] Found ${decksSnapshot.docs.length} decks with analysis`);
+                    aiSummary = `=== PITCH DECK ANALYSIS ===\n${deckAnalyses}\n\n${aiSummary || ''}`;
+                }
+            }
+        }
+        console.log(`[Generate Reply] Using AI summary for ${startupData.name}, length: ${aiSummary?.length || 0}`);
+        // Generate AI reply using the consolidated summary
         const responseAnalysis = await analyzeFounderResponse({
             name: startupData.name,
             description: startupData.description,
@@ -3756,7 +4504,7 @@ app.post('/emails/:emailId/generate-reply', authenticate, async (req, res) => {
             subject: emailData.subject || '',
             body: emailData.body || '',
             from: `${emailData.fromName || ''} <${emailData.from || ''}>`,
-        }, previousEmails);
+        }, previousEmails, aiSummary || undefined);
         if (!responseAnalysis) {
             return res.status(500).json({ error: 'Failed to generate reply. Please try again.' });
         }
@@ -3914,7 +4662,7 @@ async function analyzeDeckWithAI(deckId, fileBuffer, fileName, startupId) {
         const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const prompt = `Analyze this startup pitch deck and provide a detailed analysis in this JSON format:
 {
-  "score": number (0-100, quality/investment potential score),
+  "score": number (0-100, MUST equal sum of all base scores below),
   "summary": string (2-3 sentence summary of the pitch),
   "strengths": string[] (3-5 key strengths),
   "weaknesses": string[] (3-5 areas for improvement),
@@ -3924,9 +4672,21 @@ async function analyzeDeckWithAI(deckId, fileBuffer, fileName, startupId) {
     "growth": string or null (growth rate if mentioned),
     "funding": string or null (funding ask if mentioned)
   },
-  "recommendation": string (brief investment recommendation)
+  "recommendation": string (brief investment recommendation),
+  "scoreBreakdown": {
+    "team": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "experience": number (0-10), "domain_expertise": number (0-10), "execution_ability": number (0-5) } },
+    "market": { "base": number (0-25, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "size": number (0-10), "growth": number (0-10), "timing": number (0-5) } },
+    "product": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "innovation": number (0-8), "defensibility": number (0-7), "scalability": number (0-5) } },
+    "traction": { "base": number (0-20, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "revenue": number (0-8), "users": number (0-7), "growth_rate": number (0-5) } },
+    "deal": { "base": number (0-10, MUST equal sum of subcriteria), "adjusted": 0, "subcriteria": { "valuation": number (0-5), "terms": number (0-5) } },
+    "communication": 0,
+    "momentum": 0,
+    "redFlags": 0
+  }
 }
 
+CRITICAL: The "score" field MUST equal team.base + market.base + product.base + traction.base + deal.base.
+Each category "base" MUST equal the sum of its subcriteria.
 Respond with ONLY the JSON object.`;
         let result;
         // If we have a PDF buffer, send it to Gemini for visual analysis
@@ -3953,70 +4713,67 @@ Respond with ONLY the JSON object.`;
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             const analysis = JSON.parse(jsonMatch[0]);
+            // Reconcile breakdown scores if present
+            if (analysis.scoreBreakdown) {
+                const b = analysis.scoreBreakdown;
+                // Clamp subcriteria and recalculate base from subcriteria sum
+                if (b.team) {
+                    const s = b.team.subcriteria || {};
+                    s.experience = Math.max(0, Math.min(10, s.experience || 0));
+                    s.domain_expertise = Math.max(0, Math.min(10, s.domain_expertise || 0));
+                    s.execution_ability = Math.max(0, Math.min(5, s.execution_ability || 0));
+                    b.team.subcriteria = s;
+                    b.team.base = Math.max(0, Math.min(25, s.experience + s.domain_expertise + s.execution_ability));
+                }
+                if (b.market) {
+                    const s = b.market.subcriteria || {};
+                    s.size = Math.max(0, Math.min(10, s.size || 0));
+                    s.growth = Math.max(0, Math.min(10, s.growth || 0));
+                    s.timing = Math.max(0, Math.min(5, s.timing || 0));
+                    b.market.subcriteria = s;
+                    b.market.base = Math.max(0, Math.min(25, s.size + s.growth + s.timing));
+                }
+                if (b.product) {
+                    const s = b.product.subcriteria || {};
+                    s.innovation = Math.max(0, Math.min(8, s.innovation || 0));
+                    s.defensibility = Math.max(0, Math.min(7, s.defensibility || 0));
+                    s.scalability = Math.max(0, Math.min(5, s.scalability || 0));
+                    b.product.subcriteria = s;
+                    b.product.base = Math.max(0, Math.min(20, s.innovation + s.defensibility + s.scalability));
+                }
+                if (b.traction) {
+                    const s = b.traction.subcriteria || {};
+                    s.revenue = Math.max(0, Math.min(8, s.revenue || 0));
+                    s.users = Math.max(0, Math.min(7, s.users || 0));
+                    s.growth_rate = Math.max(0, Math.min(5, s.growth_rate || 0));
+                    b.traction.subcriteria = s;
+                    b.traction.base = Math.max(0, Math.min(20, s.revenue + s.users + s.growth_rate));
+                }
+                if (b.deal) {
+                    const s = b.deal.subcriteria || {};
+                    s.valuation = Math.max(0, Math.min(5, s.valuation || 0));
+                    s.terms = Math.max(0, Math.min(5, s.terms || 0));
+                    b.deal.subcriteria = s;
+                    b.deal.base = Math.max(0, Math.min(10, s.valuation + s.terms));
+                }
+                // Recalculate total score from breakdown bases
+                analysis.score = Math.max(0, Math.min(100, (b.team?.base || 0) + (b.market?.base || 0) + (b.product?.base || 0) + (b.traction?.base || 0) + (b.deal?.base || 0)));
+            }
             // Update deck with analysis
             await db.collection('decks').doc(deckId).update({
                 aiAnalysis: analysis,
                 status: 'processed',
                 processedAt: admin.firestore.FieldValue.serverTimestamp(),
             });
-            // Update startup score if analysis has a score
+            // Store deck score for reference, but let recalculate handle scoring
             if (analysis.score) {
-                const startupRef = db.collection('startups').doc(startupId);
-                const startupDoc = await startupRef.get();
-                if (startupDoc.exists) {
-                    const startupData = startupDoc.data();
-                    const currentScore = startupData?.currentScore || 0;
-                    // Average with existing score or use deck score
-                    const newScore = currentScore > 0 ? Math.round((currentScore + analysis.score) / 2) : analysis.score;
-                    await startupRef.update({
-                        currentScore: newScore,
-                        deckScore: analysis.score,
-                        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                    });
-                    // Create score events based on analysis
-                    const scoreEvents = [];
-                    // Add events for strengths (positive signals)
-                    if (analysis.strengths && Array.isArray(analysis.strengths)) {
-                        for (const strength of analysis.strengths.slice(0, 3)) {
-                            scoreEvents.push({
-                                category: 'product',
-                                signal: 'Pitch deck strength',
-                                impact: 3,
-                                evidence: strength,
-                            });
-                        }
-                    }
-                    // Add events for weaknesses (concerns)
-                    if (analysis.weaknesses && Array.isArray(analysis.weaknesses)) {
-                        for (const weakness of analysis.weaknesses.slice(0, 2)) {
-                            scoreEvents.push({
-                                category: 'deal',
-                                signal: 'Area of concern',
-                                impact: -2,
-                                evidence: weakness,
-                            });
-                        }
-                    }
-                    // Add overall deck analysis event
-                    scoreEvents.push({
-                        category: 'product',
-                        signal: 'Pitch deck analyzed',
-                        impact: analysis.score >= 70 ? 5 : analysis.score >= 50 ? 2 : 0,
-                        evidence: `AI analysis score: ${analysis.score}/100. ${analysis.summary || ''}`,
-                    });
-                    // Create all score events
-                    for (const event of scoreEvents) {
-                        await db.collection('scoreEvents').add({
-                            startupId,
-                            organizationId: startupData.organizationId,
-                            ...event,
-                            source: 'deck_analysis',
-                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        });
-                    }
-                    console.log(`[Deck Analysis] Created ${scoreEvents.length} score events for startup ${startupId}`);
-                }
+                await db.collection('startups').doc(startupId).update({
+                    deckScore: analysis.score,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
             }
+            // Unified score recalculation from ALL data sources (also updates AI summary)
+            await recalculateStartupScore(startupId);
             console.log(`[Deck Analysis] Completed for ${fileName}, score: ${analysis.score}`);
         }
     }
@@ -4154,14 +4911,55 @@ app.get('/startups/:id/score-events', authenticate, async (req, res) => {
 app.get('/startups/:id/score-history', authenticate, async (req, res) => {
     try {
         const startupId = req.params.id;
-        const snapshot = await db.collection('scoreHistory')
+        const days = parseInt(req.query.days) || 90;
+        // Get the startup to find its base score and creation date
+        const startupDoc = await db.collection('startups').doc(startupId).get();
+        if (!startupDoc.exists) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const startup = startupDoc.data();
+        const baseScore = startup.baseScore || startup.currentScore || 50;
+        // Get all score events for this startup
+        const eventsSnapshot = await db.collection('scoreEvents')
             .where('startupId', '==', startupId)
             .get();
-        const history = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            date: doc.data().date?.toDate?.()?.toISOString() || doc.data().date,
-        }));
+        // Build daily history from events
+        const today = new Date();
+        const startDate = new Date();
+        startDate.setDate(today.getDate() - days);
+        // Group events by date
+        const eventsByDate = {};
+        eventsSnapshot.docs.forEach(doc => {
+            const data = doc.data();
+            const eventDate = data.createdAt?.toDate?.() || new Date(data.createdAt);
+            const dateKey = eventDate.toISOString().split('T')[0];
+            if (!eventsByDate[dateKey]) {
+                eventsByDate[dateKey] = { totalImpact: 0, count: 0 };
+            }
+            eventsByDate[dateKey].totalImpact += data.impact || 0;
+            eventsByDate[dateKey].count += 1;
+        });
+        // Generate daily history points
+        const history = [];
+        let cumulativeImpact = 0;
+        // Calculate cumulative impact up to startDate
+        Object.entries(eventsByDate).forEach(([dateKey, data]) => {
+            if (new Date(dateKey) < startDate) {
+                cumulativeImpact += data.totalImpact;
+            }
+        });
+        // Generate daily points
+        for (let d = new Date(startDate); d <= today; d.setDate(d.getDate() + 1)) {
+            const dateKey = d.toISOString().split('T')[0];
+            const dayData = eventsByDate[dateKey] || { totalImpact: 0, count: 0 };
+            cumulativeImpact += dayData.totalImpact;
+            const score = Math.max(0, Math.min(100, baseScore + cumulativeImpact));
+            history.push({
+                date: dateKey,
+                score: Math.round(score),
+                events: dayData.count,
+            });
+        }
         return res.json(history);
     }
     catch (error) {
@@ -4182,17 +4980,8 @@ app.post('/startups/:id/score-events', authenticate, async (req, res) => {
             evidence: evidence || null,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        // Update startup score
-        const startupRef = db.collection('startups').doc(startupId);
-        const startupDoc = await startupRef.get();
-        if (startupDoc.exists) {
-            const currentScore = startupDoc.data()?.score || 50;
-            const newScore = Math.max(0, Math.min(100, currentScore + impact));
-            await startupRef.update({
-                score: newScore,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
+        // Unified score recalculation from ALL data sources
+        await recalculateStartupScore(startupId);
         return res.json({ id: eventRef.id, success: true });
     }
     catch (error) {
@@ -4378,8 +5167,96 @@ app.post('/evaluation/:startupId/record-response', authenticate, async (_req, re
 app.post('/evaluation/:startupId/score', authenticate, async (_req, res) => {
     return res.json({ score: 50, breakdown: {} });
 });
-app.get('/evaluation/:startupId/score-breakdown', authenticate, async (_req, res) => {
-    return res.json({ breakdown: {}, score: 50 });
+app.get('/evaluation/:startupId/score-breakdown', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.startupId;
+        const startupDoc = await db.collection('startups').doc(startupId).get();
+        if (!startupDoc.exists) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const data = startupDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const breakdown = data.scoreBreakdown || {};
+        const teamBase = breakdown.team?.base || 0;
+        const marketBase = breakdown.market?.base || 0;
+        const productBase = breakdown.product?.base || 0;
+        const tractionBase = breakdown.traction?.base || 0;
+        const dealBase = breakdown.deal?.base || 0;
+        const calculatedTotal = teamBase + marketBase + productBase + tractionBase + dealBase;
+        return res.json({
+            startupName: data.name,
+            totalScore: data.currentScore ?? calculatedTotal,
+            isPostRevenue: false,
+            recommendation: data.currentScore >= 85 ? 'strong_invest' : data.currentScore >= 70 ? 'invest' : data.currentScore >= 55 ? 'consider' : 'pass',
+            overallCommentary: data.businessModelAnalysis?.concerns?.[0] || 'Score based on AI analysis of pitch materials.',
+            strengths: data.businessModelAnalysis?.strengths || [],
+            concerns: data.businessModelAnalysis?.concerns || [],
+            sections: [
+                {
+                    name: 'Team',
+                    score: teamBase + (breakdown.team?.adjusted || 0),
+                    maxScore: 25,
+                    weight: '25%',
+                    criteria: [
+                        { name: 'Experience', score: breakdown.team?.subcriteria?.experience || 0, maxScore: 10, commentary: 'Team experience and background' },
+                        { name: 'Domain Expertise', score: breakdown.team?.subcriteria?.domain_expertise || 0, maxScore: 10, commentary: 'Founder-market fit and domain knowledge' },
+                        { name: 'Execution Ability', score: breakdown.team?.subcriteria?.execution_ability || 0, maxScore: 5, commentary: 'Ability to execute on vision' },
+                    ],
+                },
+                {
+                    name: 'Market',
+                    score: marketBase + (breakdown.market?.adjusted || 0),
+                    maxScore: 25,
+                    weight: '25%',
+                    criteria: [
+                        { name: 'Market Size', score: breakdown.market?.subcriteria?.size || 0, maxScore: 10, commentary: 'Total addressable market' },
+                        { name: 'Growth', score: breakdown.market?.subcriteria?.growth || 0, maxScore: 10, commentary: 'Market growth trajectory' },
+                        { name: 'Timing', score: breakdown.market?.subcriteria?.timing || 0, maxScore: 5, commentary: 'Why now is the right time' },
+                    ],
+                },
+                {
+                    name: 'Product',
+                    score: productBase + (breakdown.product?.adjusted || 0),
+                    maxScore: 20,
+                    weight: '20%',
+                    criteria: [
+                        { name: 'Innovation', score: breakdown.product?.subcriteria?.innovation || 0, maxScore: 8, commentary: 'Product uniqueness and innovation' },
+                        { name: 'Defensibility', score: breakdown.product?.subcriteria?.defensibility || 0, maxScore: 7, commentary: 'Competitive moat and defensibility' },
+                        { name: 'Scalability', score: breakdown.product?.subcriteria?.scalability || 0, maxScore: 5, commentary: 'Product scalability potential' },
+                    ],
+                },
+                {
+                    name: 'Traction',
+                    score: tractionBase + (breakdown.traction?.adjusted || 0),
+                    maxScore: 20,
+                    weight: '20%',
+                    criteria: [
+                        { name: 'Revenue', score: breakdown.traction?.subcriteria?.revenue || 0, maxScore: 8, commentary: 'Revenue and monetization' },
+                        { name: 'Users', score: breakdown.traction?.subcriteria?.users || 0, maxScore: 7, commentary: 'User base and adoption' },
+                        { name: 'Growth Rate', score: breakdown.traction?.subcriteria?.growth_rate || 0, maxScore: 5, commentary: 'Growth velocity' },
+                    ],
+                },
+                {
+                    name: 'Deal',
+                    score: dealBase + (breakdown.deal?.adjusted || 0),
+                    maxScore: 10,
+                    weight: '10%',
+                    criteria: [
+                        { name: 'Valuation', score: breakdown.deal?.subcriteria?.valuation || 0, maxScore: 5, commentary: 'Valuation assessment' },
+                        { name: 'Terms', score: breakdown.deal?.subcriteria?.terms || 0, maxScore: 5, commentary: 'Deal terms and structure' },
+                    ],
+                },
+            ],
+            qaHistory: { roundsCompleted: 0, questionsAsked: 0, questionsAnswered: 0 },
+            scoredAt: data.scoreUpdatedAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+        });
+    }
+    catch (error) {
+        console.error('Error fetching score breakdown:', error);
+        return res.status(500).json({ error: 'Failed to fetch score breakdown' });
+    }
 });
 // ==================== DRAFT REPLY ROUTES ====================
 app.post('/startups/:id/send-reply', authenticate, async (req, res) => {
@@ -4442,6 +5319,8 @@ app.post('/startups/:id/send-reply', authenticate, async (req, res) => {
             lastEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+        // Update the startup's AI summary with the new outbound email
+        await updateStartupAISummary(startupId);
         console.log(`[SendReply] Email sent successfully to ${toEmail} for ${data.name}, messageId: ${sendResult.messageId}`);
         return res.json({
             success: true,
@@ -4523,6 +5402,8 @@ app.post('/emails/startup/:startupId/compose', authenticate, async (req, res) =>
             lastEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+        // Update the startup's AI summary with the new outbound email
+        await updateStartupAISummary(startupId);
         console.log(`[ComposeEmail] Email sent successfully to ${toEmail} for startup ${startupData.name}, messageId: ${sendResult.messageId}`);
         return res.json({
             success: true,
@@ -4807,8 +5688,13 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req, res) => {
                                         storagePath,
                                         mimeType: attachment.contentType,
                                         source: 'email_rescan',
-                                        status: 'uploaded',
+                                        status: 'processing',
                                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                                    });
+                                    // Run AI analysis on the attachment
+                                    console.log(`[RescanAttachments] Analyzing attachment: ${fileName}`);
+                                    analyzeDeckWithAI(deckRef.id, attachment.content, fileName, id).catch(err => {
+                                        console.error(`[RescanAttachments] AI analysis failed for ${fileName}:`, err);
                                     });
                                     attachmentData.push({
                                         fileName,
@@ -4818,7 +5704,7 @@ app.post('/startups/:id/rescan-attachments', authenticate, async (req, res) => {
                                         storageUrl: fileUrl,
                                     });
                                     attachmentsFound++;
-                                    console.log(`[RescanAttachments] Stored attachment: ${fileName}`);
+                                    console.log(`[RescanAttachments] Stored and queued analysis for: ${fileName}`);
                                 }
                                 catch (attachmentError) {
                                     console.error(`[RescanAttachments] Failed to store attachment ${fileName}:`, attachmentError);
@@ -4899,8 +5785,17 @@ app.get('/startups/:id/comments', authenticate, async (req, res) => {
 app.post('/startups/:id/comments', authenticate, async (req, res) => {
     try {
         const startupId = req.params.id;
-        const { content, parentId, mentions } = req.body;
-        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+        // Validate input with Zod
+        const validationResult = commentSchema.safeParse(req.body);
+        if (!validationResult.success) {
+            return res.status(400).json({
+                error: validationResult.error.errors[0]?.message || 'Invalid input'
+            });
+        }
+        const { content, parentId, mentions } = validationResult.data;
+        // Sanitize content to prevent XSS
+        const sanitizedContent = sanitizeContent(content);
+        if (sanitizedContent.length === 0) {
             return res.status(400).json({ error: 'Comment content is required' });
         }
         // Verify startup exists and user has access
@@ -4922,7 +5817,7 @@ app.post('/startups/:id/comments', authenticate, async (req, res) => {
             authorId: req.user.userId,
             authorName: userData?.name || 'Unknown User',
             authorEmail: userData?.email || '',
-            content: content.trim(),
+            content: sanitizedContent,
             parentId: parentId || null,
             mentions: mentions || [],
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -4967,8 +5862,19 @@ app.post('/startups/:id/comments', authenticate, async (req, res) => {
 app.put('/comments/:id', authenticate, async (req, res) => {
     try {
         const commentId = req.params.id;
-        const { content } = req.body;
-        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+        // Validate content with Zod schema (only content field needed for update)
+        const contentSchema = zod_1.z.object({
+            content: zod_1.z.string().min(1, 'Comment content is required').max(10000, 'Comment is too long'),
+        });
+        const validationResult = contentSchema.safeParse(req.body);
+        if (!validationResult.success) {
+            return res.status(400).json({
+                error: validationResult.error.errors[0]?.message || 'Invalid input'
+            });
+        }
+        // Sanitize content
+        const sanitizedContent = sanitizeContent(validationResult.data.content);
+        if (sanitizedContent.length === 0) {
             return res.status(400).json({ error: 'Comment content is required' });
         }
         const commentDoc = await db.collection('comments').doc(commentId).get();
@@ -4981,7 +5887,7 @@ app.put('/comments/:id', authenticate, async (req, res) => {
             return res.status(403).json({ error: 'You can only edit your own comments' });
         }
         await db.collection('comments').doc(commentId).update({
-            content: content.trim(),
+            content: sanitizedContent,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             editedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
@@ -5050,14 +5956,14 @@ app.get('/startups/:id/invites', authenticate, async (req, res) => {
 app.post('/startups/:id/invite', authenticate, async (req, res) => {
     try {
         const startupId = req.params.id;
-        const { email, accessLevel } = req.body;
-        if (!email || typeof email !== 'string') {
-            return res.status(400).json({ error: 'Email is required' });
+        // Validate input with Zod
+        const validationResult = inviteSchema.safeParse(req.body);
+        if (!validationResult.success) {
+            return res.status(400).json({
+                error: validationResult.error.errors[0]?.message || 'Invalid input'
+            });
         }
-        const validAccessLevels = ['view', 'comment'];
-        if (!accessLevel || !validAccessLevels.includes(accessLevel)) {
-            return res.status(400).json({ error: 'Invalid access level' });
-        }
+        const { email, accessLevel } = validationResult.data;
         // Verify startup exists and user has access
         const startupDoc = await db.collection('startups').doc(startupId).get();
         if (!startupDoc.exists) {
@@ -5145,8 +6051,8 @@ app.post('/startups/:id/invite', authenticate, async (req, res) => {
         return res.status(500).json({ error: 'Failed to send invite' });
     }
 });
-// Validate magic link and get deal access
-app.get('/invite/:token', async (req, res) => {
+// Validate magic link and get deal access (public endpoint with rate limiting)
+app.get('/invite/:token', publicLimiter, async (req, res) => {
     try {
         const token = req.params.token;
         const inviteSnapshot = await db.collection('deal_invites')
@@ -5213,12 +6119,22 @@ app.get('/invite/:token', async (req, res) => {
         return res.status(500).json({ error: 'Failed to validate invite' });
     }
 });
-// Add comment via magic link (for co-investors)
-app.post('/invite/:token/comment', async (req, res) => {
+// Add comment via magic link (for co-investors) - public endpoint with rate limiting
+app.post('/invite/:token/comment', publicLimiter, async (req, res) => {
     try {
         const token = req.params.token;
-        const { content, name } = req.body;
-        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+        // Validate input with Zod
+        const validationResult = coInvestorCommentSchema.safeParse(req.body);
+        if (!validationResult.success) {
+            return res.status(400).json({
+                error: validationResult.error.errors[0]?.message || 'Invalid input'
+            });
+        }
+        const { content, name } = validationResult.data;
+        // Sanitize content and name
+        const sanitizedContent = sanitizeContent(content);
+        const sanitizedName = name ? sanitizeContent(name) : undefined;
+        if (sanitizedContent.length === 0) {
             return res.status(400).json({ error: 'Comment content is required' });
         }
         const inviteSnapshot = await db.collection('deal_invites')
@@ -5247,10 +6163,10 @@ app.post('/invite/:token/comment', async (req, res) => {
             startupId: invite.startupId,
             organizationId: invite.organizationId,
             authorId: `invite:${inviteDoc.id}`,
-            authorName: name || invite.email.split('@')[0],
+            authorName: sanitizedName || invite.email.split('@')[0],
             authorEmail: invite.email,
             isCoInvestor: true,
-            content: content.trim(),
+            content: sanitizedContent,
             parentId: null,
             mentions: [],
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -5384,6 +6300,98 @@ app.put('/notifications/read-all', authenticate, async (req, res) => {
     catch (error) {
         console.error('[Notifications] Error marking all as read:', error);
         return res.status(500).json({ error: 'Failed to mark all notifications as read' });
+    }
+});
+// Invite a new user to the organization
+app.post('/users/invite', authenticate, async (req, res) => {
+    try {
+        const { email, name, role } = req.body;
+        if (!email || !name) {
+            return res.status(400).json({ error: 'Email and name are required' });
+        }
+        // Check if user has permission to invite
+        const inviterDoc = await db.collection('users').doc(req.user.userId).get();
+        const inviterData = inviterDoc.data();
+        if (inviterData?.role !== 'admin' && inviterData?.role !== 'partner') {
+            return res.status(403).json({ error: 'Only admins and partners can invite users' });
+        }
+        // Check if email already exists in organization
+        const existingUser = await db.collection('users')
+            .where('email', '==', email.toLowerCase())
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        if (!existingUser.empty) {
+            return res.status(400).json({ error: 'A user with this email already exists in your organization' });
+        }
+        // Generate a temporary password
+        const tempPassword = require('crypto').randomBytes(8).toString('hex');
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
+        // Create the new user
+        const userRef = db.collection('users').doc();
+        await userRef.set({
+            email: email.toLowerCase(),
+            name,
+            role: role || 'analyst',
+            organizationId: req.user.organizationId,
+            password: hashedPassword,
+            isInvited: true,
+            invitedBy: req.user.userId,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        // Send invitation email
+        const transporter = nodemailer.createTransport({
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
+            auth: {
+                user: process.env.SMTP_USER || 'nitishvm@gmail.com',
+                pass: process.env.SMTP_PASSWORD,
+            },
+        });
+        const loginUrl = 'https://startup-tracker-app.web.app/login';
+        try {
+            await transporter.sendMail({
+                from: `"Startup Tracker" <${process.env.SMTP_USER || 'nitishvm@gmail.com'}>`,
+                to: email,
+                subject: `You've been invited to join Startup Tracker`,
+                html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Welcome to Startup Tracker!</h2>
+            <p>${inviterData?.name || 'Someone'} has invited you to join their organization on Startup Tracker.</p>
+            <p><strong>Your login credentials:</strong></p>
+            <ul>
+              <li><strong>Email:</strong> ${email}</li>
+              <li><strong>Temporary Password:</strong> ${tempPassword}</li>
+            </ul>
+            <p style="margin: 24px 0;">
+              <a href="${loginUrl}" style="background-color: #4F46E5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Login Now</a>
+            </p>
+            <p style="color: #666; font-size: 14px;">Please change your password after logging in.</p>
+          </div>
+        `,
+            });
+            console.log(`[Users] Sent invite email to ${email}`);
+        }
+        catch (emailError) {
+            console.error('[Users] Failed to send invite email:', emailError);
+            // User is created, but email failed - return success with warning
+            return res.json({
+                success: true,
+                warning: 'User created but email delivery failed. Please share credentials manually.',
+                user: { id: userRef.id, email, name, role: role || 'analyst' },
+                tempPassword, // Return so admin can share manually
+            });
+        }
+        return res.json({
+            success: true,
+            message: 'Invitation sent successfully',
+            user: { id: userRef.id, email, name, role: role || 'analyst' },
+        });
+    }
+    catch (error) {
+        console.error('[Users] Error inviting user:', error);
+        return res.status(500).json({ error: 'Failed to invite user' });
     }
 });
 // Get list of users in organization (for @mentions)

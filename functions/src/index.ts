@@ -511,6 +511,277 @@ ${emailSummaries.join('\n\n')}` : '=== NO EMAILS YET ==='}
   }
 }
 
+// ==================== UNIFIED SCORING FUNCTION ====================
+// Single source of truth for score calculation. ALL paths call this after storing their data.
+// It reads ALL data sources (decks, emails, enrichment, score events) and computes the score.
+async function recalculateStartupScore(startupId: string): Promise<{ currentScore: number; breakdown: Record<string, unknown> }> {
+  console.log(`[RecalcScore] Starting score recalculation for startup: ${startupId}`);
+
+  // 1. Read the startup document
+  const startupRef = db.collection('startups').doc(startupId);
+  const startupDoc = await startupRef.get();
+  if (!startupDoc.exists) {
+    throw new Error(`Startup ${startupId} not found`);
+  }
+  const startupData = startupDoc.data()!;
+
+  // 2. Fetch the latest deck with AI analysis (source of base scores)
+  const decksSnapshot = await db.collection('decks')
+    .where('startupId', '==', startupId)
+    .where('status', '==', 'processed')
+    .orderBy('processedAt', 'desc')
+    .limit(1)
+    .get();
+
+  // 3. Fetch all emails with score adjustments
+  const emailsSnapshot = await db.collection('emails')
+    .where('startupId', '==', startupId)
+    .get();
+
+  // 4. Read enrichment data from startup doc
+  const enrichmentData = startupData.enrichmentData || null;
+
+  // 5. Read score events from subcollection
+  const scoreEventsSnapshot = await startupRef.collection('scoreEvents').get();
+
+  // ---- COMPUTE BASE SCORES ----
+  // Priority: latest deck analysis > startup's existing AI analysis > defaults
+  let baseBreakdown: Record<string, { base: number; adjusted: number; subcriteria?: Record<string, number> }> = {
+    team: { base: 0, adjusted: 0, subcriteria: {} },
+    market: { base: 0, adjusted: 0, subcriteria: {} },
+    product: { base: 0, adjusted: 0, subcriteria: {} },
+    traction: { base: 0, adjusted: 0, subcriteria: {} },
+    deal: { base: 0, adjusted: 0, subcriteria: {} },
+  };
+
+  let baseSource = 'none';
+
+  // Try deck analysis first (highest priority for base scores)
+  if (!decksSnapshot.empty) {
+    const latestDeck = decksSnapshot.docs[0]!.data();
+    const deckBreakdown = latestDeck.aiAnalysis?.scoreBreakdown;
+    if (deckBreakdown) {
+      baseSource = 'deck';
+      if (deckBreakdown.team) {
+        baseBreakdown.team = {
+          base: deckBreakdown.team.base || 0,
+          adjusted: 0,
+          subcriteria: deckBreakdown.team.subcriteria || {},
+        };
+      }
+      if (deckBreakdown.market) {
+        baseBreakdown.market = {
+          base: deckBreakdown.market.base || 0,
+          adjusted: 0,
+          subcriteria: deckBreakdown.market.subcriteria || {},
+        };
+      }
+      if (deckBreakdown.product) {
+        baseBreakdown.product = {
+          base: deckBreakdown.product.base || 0,
+          adjusted: 0,
+          subcriteria: deckBreakdown.product.subcriteria || {},
+        };
+      }
+      if (deckBreakdown.traction) {
+        baseBreakdown.traction = {
+          base: deckBreakdown.traction.base || 0,
+          adjusted: 0,
+          subcriteria: deckBreakdown.traction.subcriteria || {},
+        };
+      }
+      if (deckBreakdown.deal) {
+        baseBreakdown.deal = {
+          base: deckBreakdown.deal.base || 0,
+          adjusted: 0,
+          subcriteria: deckBreakdown.deal.subcriteria || {},
+        };
+      }
+      console.log(`[RecalcScore] Base from deck analysis: team=${baseBreakdown.team.base}, market=${baseBreakdown.market.base}, product=${baseBreakdown.product.base}, traction=${baseBreakdown.traction.base}, deal=${baseBreakdown.deal.base}`);
+    }
+  }
+
+  // Fallback to startup's existing scoreBreakdown (from initial AI analysis)
+  if (baseSource === 'none' && startupData.scoreBreakdown) {
+    const sb = startupData.scoreBreakdown;
+    baseSource = 'ai_analysis';
+    for (const cat of ['team', 'market', 'product', 'traction', 'deal'] as const) {
+      if (sb[cat]) {
+        baseBreakdown[cat] = {
+          base: sb[cat].base || 0,
+          adjusted: 0,
+          subcriteria: sb[cat].subcriteria || {},
+        };
+      }
+    }
+    console.log(`[RecalcScore] Base from existing AI analysis`);
+  }
+
+  // ---- ACCUMULATE ADJUSTMENTS FROM EMAILS ----
+  let emailTeamAdj = 0;
+  let emailProductAdj = 0;
+  let emailTractionAdj = 0;
+  let emailCommunicationAdj = 0;
+  let emailMomentumAdj = 0;
+
+  emailsSnapshot.forEach((emailDoc) => {
+    const emailData = emailDoc.data();
+    // Check for scoreAdjustment in the email's AI analysis
+    const adj = emailData.aiAnalysis?.scoreAdjustment || emailData.scoreAdjustment;
+    if (adj) {
+      emailTeamAdj += adj.team || 0;
+      emailProductAdj += adj.product || 0;
+      emailTractionAdj += adj.traction || 0;
+      emailCommunicationAdj += adj.communication || 0;
+      emailMomentumAdj += adj.momentum || 0;
+    }
+  });
+
+  console.log(`[RecalcScore] Email adjustments: team=${emailTeamAdj}, product=${emailProductAdj}, traction=${emailTractionAdj}, comm=${emailCommunicationAdj}, momentum=${emailMomentumAdj}`);
+
+  // ---- ACCUMULATE ADJUSTMENTS FROM ENRICHMENT ----
+  let enrichTeamAdj = 0;
+  let enrichMarketAdj = 0;
+  let enrichTractionAdj = 0;
+
+  if (enrichmentData?.scoreImpact) {
+    enrichTeamAdj = enrichmentData.scoreImpact.teamAdjustment || 0;
+    enrichMarketAdj = enrichmentData.scoreImpact.marketAdjustment || 0;
+    enrichTractionAdj = enrichmentData.scoreImpact.tractionAdjustment || 0;
+    console.log(`[RecalcScore] Enrichment adjustments: team=${enrichTeamAdj}, market=${enrichMarketAdj}, traction=${enrichTractionAdj}`);
+  }
+
+  // ---- ACCUMULATE FROM SCORE EVENTS (subcollection) ----
+  let eventTeamAdj = 0;
+  let eventMarketAdj = 0;
+  let eventProductAdj = 0;
+  let eventTractionAdj = 0;
+  let eventDealAdj = 0;
+  let eventRedFlags = 0;
+
+  scoreEventsSnapshot.forEach((eventDoc) => {
+    const event = eventDoc.data();
+    const impact = event.impact || 0;
+    switch (event.category) {
+      case 'team': eventTeamAdj += impact; break;
+      case 'market': eventMarketAdj += impact; break;
+      case 'product': eventProductAdj += impact; break;
+      case 'traction': eventTractionAdj += impact; break;
+      case 'deal': eventDealAdj += impact; break;
+      case 'red_flag': eventRedFlags += Math.abs(impact); break;
+    }
+  });
+
+  // Also check top-level scoreEvents collection
+  const globalScoreEventsSnapshot = await db.collection('scoreEvents')
+    .where('startupId', '==', startupId)
+    .get();
+
+  globalScoreEventsSnapshot.forEach((eventDoc) => {
+    const event = eventDoc.data();
+    const impact = event.impact || 0;
+    switch (event.category) {
+      case 'team': eventTeamAdj += impact; break;
+      case 'market': eventMarketAdj += impact; break;
+      case 'product': eventProductAdj += impact; break;
+      case 'traction': eventTractionAdj += impact; break;
+      case 'deal': eventDealAdj += impact; break;
+      case 'red_flag': eventRedFlags += Math.abs(impact); break;
+    }
+  });
+
+  console.log(`[RecalcScore] Score event adjustments: team=${eventTeamAdj}, market=${eventMarketAdj}, product=${eventProductAdj}, traction=${eventTractionAdj}, deal=${eventDealAdj}, redFlags=${eventRedFlags}`);
+
+  // ---- COMBINE ALL ADJUSTMENTS ----
+  baseBreakdown.team.adjusted = emailTeamAdj + enrichTeamAdj + eventTeamAdj;
+  baseBreakdown.market.adjusted = enrichMarketAdj + eventMarketAdj;
+  baseBreakdown.product.adjusted = emailProductAdj + eventProductAdj;
+  baseBreakdown.traction.adjusted = emailTractionAdj + enrichTractionAdj + eventTractionAdj;
+  baseBreakdown.deal.adjusted = eventDealAdj;
+
+  // Clamp adjustments to reasonable bounds
+  for (const cat of ['team', 'market', 'product', 'traction', 'deal'] as const) {
+    baseBreakdown[cat].adjusted = Math.max(-20, Math.min(20, baseBreakdown[cat].adjusted));
+  }
+
+  // Communication and momentum (from emails)
+  const communication = Math.max(0, Math.min(10, 5 + emailCommunicationAdj));
+  const momentum = Math.max(0, Math.min(10, 5 + emailMomentumAdj));
+  const redFlags = Math.min(30, eventRedFlags);
+
+  // ---- COMPUTE FINAL SCORE ----
+  const baseScore =
+    baseBreakdown.team.base +
+    baseBreakdown.market.base +
+    baseBreakdown.product.base +
+    baseBreakdown.traction.base +
+    baseBreakdown.deal.base;
+
+  const adjustments =
+    baseBreakdown.team.adjusted +
+    baseBreakdown.market.adjusted +
+    baseBreakdown.product.adjusted +
+    baseBreakdown.traction.adjusted +
+    baseBreakdown.deal.adjusted +
+    communication +
+    momentum -
+    redFlags;
+
+  // If we have NO base scores at all, just use the existing score or defaults
+  // (communication 5 + momentum 5 = 10 as a minimum)
+  const currentScore = baseScore > 0
+    ? Math.max(0, Math.min(100, Math.round(baseScore + adjustments)))
+    : (startupData.currentScore || 0);
+
+  // Build the full breakdown object for Firestore
+  const fullBreakdown: Record<string, unknown> = {
+    team: {
+      base: baseBreakdown.team.base,
+      adjusted: baseBreakdown.team.adjusted,
+      subcriteria: baseBreakdown.team.subcriteria || {},
+    },
+    market: {
+      base: baseBreakdown.market.base,
+      adjusted: baseBreakdown.market.adjusted,
+      subcriteria: baseBreakdown.market.subcriteria || {},
+    },
+    product: {
+      base: baseBreakdown.product.base,
+      adjusted: baseBreakdown.product.adjusted,
+      subcriteria: baseBreakdown.product.subcriteria || {},
+    },
+    traction: {
+      base: baseBreakdown.traction.base,
+      adjusted: baseBreakdown.traction.adjusted,
+      subcriteria: baseBreakdown.traction.subcriteria || {},
+    },
+    deal: {
+      base: baseBreakdown.deal.base,
+      adjusted: baseBreakdown.deal.adjusted,
+      subcriteria: baseBreakdown.deal.subcriteria || {},
+    },
+    communication,
+    momentum,
+    redFlags,
+  };
+
+  // ---- WRITE TO FIRESTORE ----
+  await startupRef.update({
+    currentScore,
+    baseScore,
+    scoreBreakdown: fullBreakdown,
+    scoreUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  console.log(`[RecalcScore] Updated ${startupData.name}: score=${currentScore} (base=${baseScore}, adj=${Math.round(adjustments)}, comm=${communication}, mom=${momentum}, flags=-${redFlags}), source=${baseSource}`);
+
+  // Also update the consolidated AI summary
+  await updateStartupAISummary(startupId);
+
+  return { currentScore, breakdown: fullBreakdown };
+}
+
 // AI Helper function to analyze an attachment (pitch deck, document)
 async function analyzeAttachmentWithAI(fileName: string, mimeType: string, startupName: string): Promise<{
   score: number;
@@ -2580,9 +2851,8 @@ async function enrichStartup(startupId: string, startupData: Record<string, unkn
       }
     }
 
-    // Apply score adjustments
+    // Store score events for enrichment findings (recalculate will read these)
     if (scoreImpact.signals.length > 0) {
-      // Create score events for enrichment findings
       const batch = db.batch();
       for (const signal of scoreImpact.signals) {
         const eventRef = db.collection('scoreEvents').doc();
@@ -2600,31 +2870,15 @@ async function enrichStartup(startupId: string, startupData: Record<string, unkn
         });
       }
       await batch.commit();
-
-      // Update score breakdown
-      const currentBreakdown = (startupData.scoreBreakdown as Record<string, { base: number; adjusted: number }>) || {};
-      if (currentBreakdown.team) {
-        currentBreakdown.team.adjusted = (currentBreakdown.team.adjusted || 0) + scoreImpact.teamAdjustment;
-      }
-      if (currentBreakdown.market) {
-        currentBreakdown.market.adjusted = (currentBreakdown.market.adjusted || 0) + scoreImpact.marketAdjustment;
-      }
-      if (currentBreakdown.traction) {
-        currentBreakdown.traction.adjusted = (currentBreakdown.traction.adjusted || 0) + scoreImpact.tractionAdjustment;
-      }
-      updateData.scoreBreakdown = currentBreakdown;
-
-      // Recalculate total score
-      const totalAdjustment = scoreImpact.teamAdjustment + scoreImpact.marketAdjustment + scoreImpact.tractionAdjustment;
-      if (typeof startupData.currentScore === 'number') {
-        updateData.currentScore = Math.min(100, Math.max(0, startupData.currentScore + totalAdjustment));
-      }
     }
 
     enrichmentData.enrichmentStatus = 'completed';
     updateData.enrichmentData = enrichmentData;
 
     await startupRef.update(updateData);
+
+    // Unified score recalculation from ALL data sources
+    await recalculateStartupScore(startupId);
 
     console.log(`[Enrichment] Completed enrichment for: ${startupData.name}`);
     return enrichmentData;
@@ -3005,23 +3259,24 @@ app.post('/startups/:id/analyze', authenticate, async (req: AuthRequest, res) =>
       return res.status(500).json({ error: 'AI analysis failed' });
     }
 
-    // Update startup with AI analysis
+    // Store AI analysis data (non-score fields) on the startup doc
     await startupRef.update({
-      currentScore: aiAnalysis.currentScore,
-      baseScore: aiAnalysis.currentScore,
-      scoreBreakdown: aiAnalysis.scoreBreakdown,
       businessModelAnalysis: aiAnalysis.businessModelAnalysis,
       sector: aiAnalysis.businessModelAnalysis?.sector,
       draftReply: aiAnalysis.draftReply,
       draftReplyStatus: data.draftReplyStatus || 'pending',
-      scoreUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      // Store the AI's breakdown as the base for recalculation
+      scoreBreakdown: aiAnalysis.scoreBreakdown,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    console.log(`[Analyze] AI analysis complete. Score: ${aiAnalysis.currentScore}`);
+    // Unified score recalculation from ALL data sources
+    const { currentScore } = await recalculateStartupScore(req.params.id as string);
+
+    console.log(`[Analyze] AI analysis complete. Score: ${currentScore}`);
     return res.json({
       success: true,
-      score: aiAnalysis.currentScore,
+      score: currentScore,
       sector: aiAnalysis.businessModelAnalysis?.sector,
     });
   } catch (error) {
@@ -3552,68 +3807,9 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
               });
 
-              // Update startup score based on AI analysis
-              if (responseAnalysis && responseAnalysis.scoreAdjustment) {
-                const adj = responseAnalysis.scoreAdjustment;
-                const currentBreakdown = startupData.scoreBreakdown || {};
-
-                // Calculate score adjustments
-                const communicationAdj = adj.communication || 0;
-                const teamAdj = adj.team || 0;
-                const productAdj = adj.product || 0;
-                const tractionAdj = adj.traction || 0;
-                const momentumAdj = adj.momentum || 0;
-
-                // Update score breakdown
-                const newBreakdown = {
-                  ...currentBreakdown,
-                  communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
-                  momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
-                  team: currentBreakdown.team ? {
-                    ...currentBreakdown.team,
-                    adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
-                  } : currentBreakdown.team,
-                  product: currentBreakdown.product ? {
-                    ...currentBreakdown.product,
-                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
-                  } : currentBreakdown.product,
-                  traction: currentBreakdown.traction ? {
-                    ...currentBreakdown.traction,
-                    adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
-                  } : currentBreakdown.traction,
-                };
-
-                // Recalculate total score
-                const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
-                const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
-                const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
-                const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
-                const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
-                const commScore = newBreakdown.communication || 5;
-                const momScore = newBreakdown.momentum || 5;
-                const redFlags = newBreakdown.redFlags || 0;
-
-                const newTotalScore = Math.round(
-                  teamScore + marketScore + productScore + tractionScore + dealScore +
-                  commScore + momScore - redFlags
-                );
-
-                // Record score event
-                await db.collection('startups').doc(startupDoc.id).collection('scoreEvents').add({
-                  previousScore: startupData.currentScore || 0,
-                  newScore: newTotalScore,
-                  change: newTotalScore - (startupData.currentScore || 0),
-                  reason: `Founder response analyzed: ${adj.reasoning}`,
-                  source: 'founder_response',
-                  aiAnalysis: responseAnalysis.responseQuality,
-                  recommendation: responseAnalysis.recommendation,
-                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                });
-
-                // Update startup with new score and draft reply
+              // Store email analysis metadata on startup (non-score fields)
+              if (responseAnalysis) {
                 await startupDoc.ref.update({
-                  currentScore: newTotalScore,
-                  scoreBreakdown: newBreakdown,
                   lastEmailReceivedAt: admin.firestore.FieldValue.serverTimestamp(),
                   lastResponseAnalysis: {
                     quality: responseAnalysis.responseQuality,
@@ -3626,7 +3822,18 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                   updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                 });
 
-                console.log(`[EmailSync] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore} (${adj.reasoning})`);
+                // Record score event for history
+                if (responseAnalysis.scoreAdjustment) {
+                  const adj = responseAnalysis.scoreAdjustment;
+                  await db.collection('startups').doc(startupDoc.id).collection('scoreEvents').add({
+                    previousScore: startupData.currentScore || 0,
+                    reason: `Founder response analyzed: ${adj.reasoning}`,
+                    source: 'founder_response',
+                    aiAnalysis: responseAnalysis.responseQuality,
+                    recommendation: responseAnalysis.recommendation,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  });
+                }
               } else {
                 // Just update last contact date if no AI analysis
                 await startupDoc.ref.update({
@@ -3635,8 +3842,8 @@ app.post('/inbox/sync', authenticate, async (req: AuthRequest, res) => {
                 });
               }
 
-              // Update the startup's AI summary with new email analysis
-              await updateStartupAISummary(startupDoc.id);
+              // Unified score recalculation from ALL data sources
+              await recalculateStartupScore(startupDoc.id);
 
               console.log(`[EmailSync] Stored founder reply for startup: ${startupData.name}${responseAnalysis ? ` - AI recommends: ${responseAnalysis.recommendation}` : ''}`);
               processed++;
@@ -4248,16 +4455,13 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // Add AI analysis results if available
+    // Add AI analysis results if available (store data, NOT scores - recalculate will handle scoring)
     if (aiAnalysis) {
-      startupData.currentScore = combinedScore;
-      startupData.baseScore = combinedScore;
       startupData.emailScore = aiAnalysis.currentScore;
       startupData.scoreBreakdown = aiAnalysis.scoreBreakdown;
       startupData.businessModelAnalysis = aiAnalysis.businessModelAnalysis;
       startupData.sector = aiAnalysis.businessModelAnalysis?.sector;
       startupData.draftReplyStatus = 'pending';
-      startupData.scoreUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
 
       // Add attachment analysis insights to key questions
       if (attachmentAnalyses.length > 0) {
@@ -4276,10 +4480,13 @@ app.post('/inbox/queue/:id/approve', authenticate, async (req: AuthRequest, res)
         startupData.draftReply = aiAnalysis.draftReply;
       }
 
-      console.log(`[Approve] AI analysis complete. Combined Score: ${combinedScore}`);
+      console.log(`[Approve] AI analysis complete.`);
     }
 
     await startupRef.set(startupData);
+
+    // Unified score recalculation from ALL data sources
+    await recalculateStartupScore(startupRef.id);
 
     // Create score events if AI analysis was performed
     if (aiAnalysis) {
@@ -4881,57 +5088,13 @@ app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res)
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Update startup score based on AI analysis
+    // Store analysis metadata on startup (non-score fields)
     if (responseAnalysis.scoreAdjustment) {
       const adj = responseAnalysis.scoreAdjustment;
-      const currentBreakdown = startupData.scoreBreakdown || {};
 
-      // Calculate score adjustments
-      const communicationAdj = adj.communication || 0;
-      const teamAdj = adj.team || 0;
-      const productAdj = adj.product || 0;
-      const tractionAdj = adj.traction || 0;
-      const momentumAdj = adj.momentum || 0;
-
-      // Update score breakdown
-      const newBreakdown = {
-        ...currentBreakdown,
-        communication: Math.max(0, Math.min(10, (currentBreakdown.communication || 5) + communicationAdj)),
-        momentum: Math.max(0, Math.min(10, (currentBreakdown.momentum || 5) + momentumAdj)),
-        team: currentBreakdown.team ? {
-          ...currentBreakdown.team,
-          adjusted: Math.max(0, Math.min(25, (currentBreakdown.team.adjusted || currentBreakdown.team.base || 15) + teamAdj)),
-        } : currentBreakdown.team,
-        product: currentBreakdown.product ? {
-          ...currentBreakdown.product,
-          adjusted: Math.max(0, Math.min(20, (currentBreakdown.product.adjusted || currentBreakdown.product.base || 12) + productAdj)),
-        } : currentBreakdown.product,
-        traction: currentBreakdown.traction ? {
-          ...currentBreakdown.traction,
-          adjusted: Math.max(0, Math.min(20, (currentBreakdown.traction.adjusted || currentBreakdown.traction.base || 10) + tractionAdj)),
-        } : currentBreakdown.traction,
-      };
-
-      // Recalculate total score
-      const teamScore = newBreakdown.team?.adjusted || newBreakdown.team?.base || 0;
-      const marketScore = newBreakdown.market?.adjusted || newBreakdown.market?.base || 0;
-      const productScore = newBreakdown.product?.adjusted || newBreakdown.product?.base || 0;
-      const tractionScore = newBreakdown.traction?.adjusted || newBreakdown.traction?.base || 0;
-      const dealScore = newBreakdown.deal?.adjusted || newBreakdown.deal?.base || 0;
-      const commScore = newBreakdown.communication || 5;
-      const momScore = newBreakdown.momentum || 5;
-      const redFlags = newBreakdown.redFlags || 0;
-
-      const newTotalScore = Math.round(
-        teamScore + marketScore + productScore + tractionScore + dealScore +
-        commScore + momScore - redFlags
-      );
-
-      // Record score event
+      // Record score event for history tracking
       await db.collection('startups').doc(startupId).collection('scoreEvents').add({
         previousScore: startupData.currentScore || 0,
-        newScore: newTotalScore,
-        change: newTotalScore - (startupData.currentScore || 0),
         reason: `Email re-analyzed: ${adj.reasoning}`,
         source: 'email_reanalysis',
         emailId: emailId,
@@ -4939,27 +5102,23 @@ app.post('/emails/:emailId/analyze', authenticate, async (req: AuthRequest, res)
         recommendation: responseAnalysis.recommendation,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-
-      // Update startup with new score and draft reply
-      await startupDoc.ref.update({
-        currentScore: newTotalScore,
-        scoreBreakdown: newBreakdown,
-        lastResponseAnalysis: {
-          quality: responseAnalysis.responseQuality,
-          recommendation: responseAnalysis.recommendation,
-          recommendationReason: responseAnalysis.recommendationReason,
-          suggestedQuestions: responseAnalysis.suggestedQuestions,
-          draftReply: responseAnalysis.draftReply,
-          analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      console.log(`[Re-analyze] Updated score for ${startupData.name}: ${startupData.currentScore} -> ${newTotalScore}`);
     }
 
-    // Update the startup's consolidated AI summary
-    await updateStartupAISummary(startupId);
+    // Update startup with response analysis metadata
+    await startupDoc.ref.update({
+      lastResponseAnalysis: {
+        quality: responseAnalysis.responseQuality,
+        recommendation: responseAnalysis.recommendation,
+        recommendationReason: responseAnalysis.recommendationReason,
+        suggestedQuestions: responseAnalysis.suggestedQuestions,
+        draftReply: responseAnalysis.draftReply,
+        analyzedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Unified score recalculation from ALL data sources (also updates AI summary)
+    await recalculateStartupScore(startupId);
 
     return res.json({
       success: true,
@@ -5388,85 +5547,16 @@ Respond with ONLY the JSON object.`;
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Update startup score if analysis has a score
+      // Store deck score for reference, but let recalculate handle scoring
       if (analysis.score) {
-        const startupRef = db.collection('startups').doc(startupId);
-        const startupDoc = await startupRef.get();
-        if (startupDoc.exists) {
-          const startupData = startupDoc.data()!;
-          // Use the reconciled score directly (no more averaging with old mismatched score)
-          const newScore = analysis.score;
-          const updatePayload: Record<string, unknown> = {
-            currentScore: newScore,
-            baseScore: newScore,
-            deckScore: analysis.score,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          };
-
-          // Store breakdown if available
-          if (analysis.scoreBreakdown) {
-            updatePayload.scoreBreakdown = analysis.scoreBreakdown;
-          }
-
-          await startupRef.update(updatePayload);
-
-          // Create score events based on analysis
-          const scoreEvents: Array<{
-            category: string;
-            signal: string;
-            impact: number;
-            evidence: string;
-          }> = [];
-
-          // Add events for strengths (positive signals)
-          if (analysis.strengths && Array.isArray(analysis.strengths)) {
-            for (const strength of analysis.strengths.slice(0, 3)) {
-              scoreEvents.push({
-                category: 'product',
-                signal: 'Pitch deck strength',
-                impact: 3,
-                evidence: strength,
-              });
-            }
-          }
-
-          // Add events for weaknesses (concerns)
-          if (analysis.weaknesses && Array.isArray(analysis.weaknesses)) {
-            for (const weakness of analysis.weaknesses.slice(0, 2)) {
-              scoreEvents.push({
-                category: 'deal',
-                signal: 'Area of concern',
-                impact: -2,
-                evidence: weakness,
-              });
-            }
-          }
-
-          // Add overall deck analysis event
-          scoreEvents.push({
-            category: 'product',
-            signal: 'Pitch deck analyzed',
-            impact: analysis.score >= 70 ? 5 : analysis.score >= 50 ? 2 : 0,
-            evidence: `AI analysis score: ${analysis.score}/100. ${analysis.summary || ''}`,
-          });
-
-          // Create all score events
-          for (const event of scoreEvents) {
-            await db.collection('scoreEvents').add({
-              startupId,
-              organizationId: startupData.organizationId,
-              ...event,
-              source: 'deck_analysis',
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-          }
-
-          console.log(`[Deck Analysis] Created ${scoreEvents.length} score events for startup ${startupId}`);
-        }
+        await db.collection('startups').doc(startupId).update({
+          deckScore: analysis.score,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
 
-      // Update the startup's consolidated AI summary
-      await updateStartupAISummary(startupId);
+      // Unified score recalculation from ALL data sources (also updates AI summary)
+      await recalculateStartupScore(startupId);
 
       console.log(`[Deck Analysis] Completed for ${fileName}, score: ${analysis.score}`);
     }
@@ -5708,17 +5798,8 @@ app.post('/startups/:id/score-events', authenticate, async (req: AuthRequest, re
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Update startup score
-    const startupRef = db.collection('startups').doc(startupId);
-    const startupDoc = await startupRef.get();
-    if (startupDoc.exists) {
-      const currentScore = startupDoc.data()?.score || 50;
-      const newScore = Math.max(0, Math.min(100, currentScore + impact));
-      await startupRef.update({
-        score: newScore,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-    }
+    // Unified score recalculation from ALL data sources
+    await recalculateStartupScore(startupId);
 
     return res.json({ id: eventRef.id, success: true });
   } catch (error) {
