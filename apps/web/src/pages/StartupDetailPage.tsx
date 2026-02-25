@@ -56,6 +56,44 @@ import { format } from 'date-fns';
 import type { DealStatus, ScoreBreakdown } from '@startup-tracker/shared';
 import { ScoreTimelineChart } from '@/components/ScoreTimelineChart';
 
+/** Safely parse dates that may be ISO strings, Firestore Timestamps ({_seconds}), or Date objects */
+function safeParseDate(value: unknown): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value === 'string') {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof value === 'number') {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // Firestore Timestamp object { _seconds, _nanoseconds } or { seconds, nanoseconds }
+  if (typeof value === 'object' && value !== null) {
+    const obj = value as Record<string, unknown>;
+    const seconds = (obj._seconds ?? obj.seconds) as number | undefined;
+    if (typeof seconds === 'number') {
+      return new Date(seconds * 1000);
+    }
+    // Has toDate() method (Firestore Timestamp)
+    if ('toDate' in obj && typeof obj.toDate === 'function') {
+      return obj.toDate() as Date;
+    }
+  }
+  return null;
+}
+
+/** Format a date safely — returns fallback string if date is invalid */
+function safeFormat(value: unknown, formatStr: string, fallback = 'Unknown date'): string {
+  const d = safeParseDate(value);
+  if (!d) return fallback;
+  try {
+    return format(d, formatStr);
+  } catch {
+    return fallback;
+  }
+}
+
 interface BusinessModelAnalysis {
   sector: string;
   sectorConfidence: number;
@@ -749,7 +787,8 @@ export default function StartupDetailPage() {
                 <Clock className="w-4 h-4" />
                 <span>
                   {(() => {
-                    const startDate = new Date(startup.firstEmailDate || startup.createdAt);
+                    const startDate = safeParseDate(startup.firstEmailDate) || safeParseDate(startup.createdAt);
+                    if (!startDate) return 'New in pipeline';
                     const days = Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
                     return `${days} ${days === 1 ? 'day' : 'days'} in pipeline`;
                   })()}
@@ -765,8 +804,8 @@ export default function StartupDetailPage() {
                 {(['team', 'market', 'product', 'traction', 'deal'] as const).map((key) => {
                   const category = breakdown[key];
                   if (!category) return null;  // Skip if category is undefined
-                  // Use adjusted if it exists, otherwise use base (not both added together)
-                  const total = category.adjusted ?? category.base ?? 0;
+                  // Score = base + adjusted (adjusted is the incremental change on top of base)
+                  const total = (category.base ?? 0) + (category.adjusted ?? 0);
                   const maxScore = key === 'deal' ? 10 : key === 'product' || key === 'traction' ? 20 : 25;
                   const percentage = (total / maxScore) * 100;
 
@@ -999,6 +1038,7 @@ export default function StartupDetailPage() {
                 {scoreEvents?.data.slice(0, 5).map((event: {
                   id: string;
                   timestamp: string;
+                  createdAt?: string;
                   signal: string;
                   impact: number;
                   category: string;
@@ -1019,7 +1059,7 @@ export default function StartupDetailPage() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-gray-900 truncate">{event.signal}</p>
                       <p className="text-xs text-gray-500">
-                        {event.timestamp ? format(new Date(event.timestamp), 'MMM d, yyyy') : 'Unknown date'} · {event.category}
+                        {safeFormat(event.timestamp || event.createdAt, 'MMM d, yyyy')} · {event.category}
                       </p>
                     </div>
                     <span
