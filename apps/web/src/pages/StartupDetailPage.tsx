@@ -148,7 +148,8 @@ export default function StartupDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'overview' | 'analysis' | 'research' | 'deck' | 'emails' | 'events' | 'comments'>('analysis');
+  const [activeTab, setActiveTab] = useState<'evaluate' | 'research' | 'docs' | 'emails' | 'notes'>('evaluate');
+  const [gpNotes, setGpNotes] = useState<string>('');
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isComposingEmail, setIsComposingEmail] = useState(false);
   const [composeSubject, setComposeSubject] = useState('');
@@ -206,7 +207,8 @@ export default function StartupDetailPage() {
     enabled: !!id,
   });
 
-  const { data: commMetrics } = useQuery({
+  // commMetrics kept for future use (Communication Health removed from UI per Phase 1.1 plan)
+  const { data: _commMetrics } = useQuery({
     queryKey: ['startup-comm-metrics', id],
     queryFn: () => emailsApi.getMetrics(id!),
     enabled: !!id,
@@ -280,6 +282,13 @@ export default function StartupDetailPage() {
       setChatMessages(chatHistory.messages);
     }
   }, [chatHistory]);
+
+  // Sync GP notes from startup data
+  useEffect(() => {
+    if (startup?.gpNotes !== undefined) {
+      setGpNotes(startup.gpNotes || '');
+    }
+  }, [startup?.gpNotes]);
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -521,6 +530,17 @@ export default function StartupDetailPage() {
     },
   });
 
+  // GP Notes mutation — saves to startup.gpNotes via PATCH
+  const saveGpNotesMutation = useMutation({
+    mutationFn: (notes: string) => startupsApi.update(id!, { gpNotes: notes }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startup', id] });
+    },
+    onError: () => {
+      toast.error('Failed to save notes');
+    },
+  });
+
   // Snooze mutation - generates AI email and schedules follow-up
   const snoozeMutation = useMutation({
     mutationFn: ({ reason, followUpMonths }: { reason: string; followUpMonths: number }) =>
@@ -735,7 +755,7 @@ export default function StartupDetailPage() {
               </button>
               <button
                 onClick={() => {
-                  setActiveTab('emails');
+                  setActiveTab('emails' as const);
                   setIsComposingEmail(true);
                   setReplyToEmail(null);
                   setComposeSubject(`Following up - ${startup.name}`);
@@ -835,33 +855,35 @@ export default function StartupDetailPage() {
                 })}
               </div>
 
-              {/* Additional signals */}
-              <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-200">
-                {(breakdown.communication ?? 0) !== 0 && (
-                  <div className="flex items-center gap-1 text-sm">
-                    <Mail className="w-4 h-4 text-primary-500" />
-                    <span className={(breakdown.communication ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
-                      {(breakdown.communication ?? 0) > 0 ? '+' : ''}{(breakdown.communication ?? 0).toFixed(1)} comm
-                    </span>
-                  </div>
-                )}
-                {(breakdown.momentum ?? 0) !== 0 && (
-                  <div className="flex items-center gap-1 text-sm">
-                    <TrendingUp className="w-4 h-4 text-primary-500" />
-                    <span className={(breakdown.momentum ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
-                      {(breakdown.momentum ?? 0) > 0 ? '+' : ''}{(breakdown.momentum ?? 0).toFixed(1)} momentum
-                    </span>
-                  </div>
-                )}
-                {(breakdown.redFlags ?? 0) !== 0 && (
-                  <div className="flex items-center gap-1 text-sm">
-                    <AlertTriangle className="w-4 h-4 text-danger-500" />
-                    <span className="text-danger-600">
-                      {(breakdown.redFlags ?? 0).toFixed(1)} red flags
-                    </span>
-                  </div>
-                )}
-              </div>
+              {/* Additional signals — only show comm/momentum if non-default (not 5.0 baseline) */}
+              {((breakdown.communication ?? 5) !== 5 || (breakdown.momentum ?? 5) !== 5 || (breakdown.redFlags ?? 0) !== 0) && (
+                <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-200">
+                  {(breakdown.communication ?? 5) !== 5 && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <Mail className="w-4 h-4 text-primary-500" />
+                      <span className={(breakdown.communication ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
+                        {(breakdown.communication ?? 0) > 0 ? '+' : ''}{(breakdown.communication ?? 0).toFixed(1)} comm
+                      </span>
+                    </div>
+                  )}
+                  {(breakdown.momentum ?? 5) !== 5 && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <TrendingUp className="w-4 h-4 text-primary-500" />
+                      <span className={(breakdown.momentum ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
+                        {(breakdown.momentum ?? 0) > 0 ? '+' : ''}{(breakdown.momentum ?? 0).toFixed(1)} momentum
+                      </span>
+                    </div>
+                  )}
+                  {(breakdown.redFlags ?? 0) !== 0 && (
+                    <div className="flex items-center gap-1 text-sm">
+                      <AlertTriangle className="w-4 h-4 text-danger-500" />
+                      <span className="text-danger-600">
+                        {(breakdown.redFlags ?? 0).toFixed(1)} red flags
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -918,11 +940,12 @@ export default function StartupDetailPage() {
                       parts.push(`with balanced scores across categories.`);
                     }
 
-                    // Communication bonus (with null checks)
-                    if ((breakdown.communication ?? 0) > 2) {
-                      parts.push(`Strong founder communication adds +${(breakdown.communication ?? 0).toFixed(1)} points.`);
-                    } else if ((breakdown.communication ?? 0) < -2) {
-                      parts.push(`Poor communication responsiveness deducts ${Math.abs(breakdown.communication ?? 0).toFixed(1)} points.`);
+                    // Communication bonus — only mention if it's meaningfully different from 5.0 baseline
+                    const commVal = breakdown.communication ?? 5;
+                    if (commVal !== 5 && commVal > 2) {
+                      parts.push(`Strong founder communication adds +${commVal.toFixed(1)} points.`);
+                    } else if (commVal !== 5 && commVal < -2) {
+                      parts.push(`Poor communication responsiveness deducts ${Math.abs(commVal).toFixed(1)} points.`);
                     }
 
                     // Red flags (with null checks)
@@ -943,13 +966,11 @@ export default function StartupDetailPage() {
       <div className="border-b border-gray-200 -mx-4 sm:mx-0 px-4 sm:px-0 overflow-x-auto">
         <nav className="flex gap-4 sm:gap-8 min-w-max">
           {[
-            { id: 'overview', label: 'Overview', icon: BarChart3 },
-            { id: 'analysis', label: 'Analysis', icon: Brain },
+            { id: 'evaluate', label: 'Evaluate', icon: Brain },
             { id: 'research', label: 'Research', icon: Sparkles },
-            { id: 'deck', label: 'Docs', icon: FileText },
+            { id: 'docs', label: 'Docs', icon: FileText },
             { id: 'emails', label: 'Emails', icon: Mail },
-            { id: 'comments', label: 'Team', icon: MessageSquare },
-            { id: 'events', label: 'Events', icon: Clock },
+            { id: 'notes', label: 'Notes & Team', icon: MessageSquare },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -969,118 +990,7 @@ export default function StartupDetailPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Communication metrics */}
-          <div className="card p-5">
-            <h3 className="font-semibold text-gray-900 mb-4">Communication Health</h3>
-            {commMetrics?.totalEmails > 0 ? (
-              <div className="space-y-4">
-                <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-gray-600">Response Time</span>
-                    <span className="font-medium">
-                      {commMetrics.avgResponseTimeHours?.toFixed(1) ?? '-'} hours avg
-                    </span>
-                  </div>
-                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                    <div
-                      className={clsx(
-                        'h-full rounded-full',
-                        (commMetrics.avgResponseTimeHours ?? 99) < 12
-                          ? 'bg-success-500'
-                          : (commMetrics.avgResponseTimeHours ?? 99) < 48
-                          ? 'bg-warning-500'
-                          : 'bg-danger-500'
-                      )}
-                      style={{
-                        width: `${Math.max(0, 100 - (commMetrics.avgResponseTimeHours ?? 0) * 2)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-gray-600">Response Rate</span>
-                    <span className="font-medium">
-                      {((commMetrics.responseRate ?? 0) * 100).toFixed(0)}%
-                    </span>
-                  </div>
-                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-primary-500 rounded-full"
-                      style={{ width: `${(commMetrics.responseRate ?? 0) * 100}%` }}
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between text-sm pt-2 border-t border-gray-200">
-                  <span className="text-gray-600">Total Emails</span>
-                  <span className="font-medium">{commMetrics.totalEmails}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-600">Proactive Updates</span>
-                  <span className="font-medium">{commMetrics.proactiveUpdates}</span>
-                </div>
-              </div>
-            ) : (
-              <p className="text-gray-500">No email data yet. Connect Gmail to track communications.</p>
-            )}
-          </div>
-
-          {/* Recent activity */}
-          <div className="card p-5">
-            <h3 className="font-semibold text-gray-900 mb-4">Recent Score Changes</h3>
-            {(scoreEvents?.data?.length ?? 0) > 0 ? (
-              <div className="space-y-3">
-                {scoreEvents?.data.slice(0, 5).map((event: {
-                  id: string;
-                  timestamp: string;
-                  createdAt?: string;
-                  signal: string;
-                  impact: number;
-                  category: string;
-                }) => (
-                  <div key={event.id} className="flex items-start gap-3">
-                    <div
-                      className={clsx(
-                        'mt-1 w-5 h-5 rounded-full flex items-center justify-center',
-                        event.impact > 0 ? 'bg-success-100' : 'bg-danger-100'
-                      )}
-                    >
-                      {event.impact > 0 ? (
-                        <CheckCircle className="w-3 h-3 text-success-600" />
-                      ) : (
-                        <AlertTriangle className="w-3 h-3 text-danger-600" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-900 truncate">{event.signal}</p>
-                      <p className="text-xs text-gray-500">
-                        {safeFormat(event.timestamp || event.createdAt, 'MMM d, yyyy')} · {event.category}
-                      </p>
-                    </div>
-                    <span
-                      className={clsx(
-                        'text-sm font-medium',
-                        event.impact > 0 ? 'text-success-600' : 'text-danger-600'
-                      )}
-                    >
-                      {event.impact > 0 ? '+' : ''}{event.impact.toFixed(1)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-gray-500">No score events yet.</p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'analysis' && (
+      {activeTab === 'evaluate' && (
         <div className="space-y-6">
 
           {/* ===== PERSISTENT ANALYSIS HEADER ===== */}
@@ -1564,6 +1474,88 @@ export default function StartupDetailPage() {
                 ? 'You can reactivate the deal to continue reviewing it.'
                 : 'Snoozing schedules an automatic follow-up. Passing sends a polite rejection email.'}
             </p>
+          </div>
+
+          {/* Score Timeline Chart — from former Events tab */}
+          <ScoreTimelineChart data={scoreHistory || []} />
+
+          {/* Recent Score Events — combined from Overview + Events */}
+          <div className="card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Activity className="w-5 h-5 text-primary-600" />
+                <h3 className="font-semibold text-gray-900">Score Events</h3>
+              </div>
+              {(scoreEvents?.data?.length ?? 0) === 0 && (
+                <button
+                  onClick={() => generateScoreEventsMutation.mutate()}
+                  disabled={generateScoreEventsMutation.isPending}
+                  className="btn btn-secondary btn-sm flex items-center gap-1"
+                >
+                  {generateScoreEventsMutation.isPending ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3 h-3" />
+                  )}
+                  Generate
+                </button>
+              )}
+            </div>
+            {(scoreEvents?.data?.length ?? 0) > 0 ? (
+              <div className="divide-y divide-gray-100">
+                {scoreEvents?.data.map((event: {
+                  id: string;
+                  timestamp: string;
+                  createdAt?: string;
+                  signal: string;
+                  impact: number;
+                  category: string;
+                  source?: string;
+                  evidence?: string;
+                }) => (
+                  <div key={event.id} className="py-3 flex items-start gap-3">
+                    <div
+                      className={clsx(
+                        'mt-1 w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0',
+                        event.impact > 0 ? 'bg-success-100' : 'bg-danger-100'
+                      )}
+                    >
+                      {event.impact > 0 ? (
+                        <TrendingUp className="w-3.5 h-3.5 text-success-600" />
+                      ) : (
+                        <TrendingDown className="w-3.5 h-3.5 text-danger-600" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900">{event.signal}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-xs text-gray-500">
+                          {safeFormat(event.timestamp || event.createdAt, 'MMM d, yyyy')}
+                        </span>
+                        <span className="badge bg-gray-100 text-gray-600 text-xs">{event.category}</span>
+                        {event.source && <span className="text-xs text-gray-400">via {event.source}</span>}
+                      </div>
+                      {event.evidence && (
+                        <p className="text-xs text-gray-500 mt-1 italic">"{event.evidence}"</p>
+                      )}
+                    </div>
+                    <span
+                      className={clsx(
+                        'text-sm font-bold flex-shrink-0',
+                        event.impact > 0 ? 'text-success-600' : 'text-danger-600'
+                      )}
+                    >
+                      {event.impact > 0 ? '+' : ''}{event.impact.toFixed(1)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-6">
+                <Clock className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+                <p className="text-sm text-gray-500">No score events yet.</p>
+              </div>
+            )}
           </div>
 
           {/* AI Chat Section */}
@@ -2466,7 +2458,7 @@ export default function StartupDetailPage() {
         </div>
       )}
 
-      {activeTab === 'deck' && (
+      {activeTab === 'docs' && (
         <div className="space-y-6">
           {/* Document list */}
           {decks && decks.length > 0 && (
@@ -3050,8 +3042,30 @@ export default function StartupDetailPage() {
         </>
       )}
 
-      {activeTab === 'comments' && (
+      {activeTab === 'notes' && (
         <div className="space-y-6">
+          {/* GP Notes — private free-text notes, auto-saved on blur */}
+          <div className="card p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <FileText className="w-5 h-5 text-primary-600" />
+              <h3 className="font-semibold text-gray-900">My Notes</h3>
+              <span className="text-xs text-gray-400 ml-auto">Private · auto-saved</span>
+            </div>
+            <textarea
+              value={gpNotes}
+              onChange={(e) => setGpNotes(e.target.value)}
+              onBlur={() => saveGpNotesMutation.mutate(gpNotes)}
+              placeholder="Add private notes about this deal — meeting notes, red flags, thesis fit, key questions answered..."
+              className="input w-full min-h-[140px] resize-y text-sm"
+              rows={5}
+            />
+            {saveGpNotesMutation.isPending && (
+              <p className="text-xs text-gray-400 mt-1 flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" /> Saving...
+              </p>
+            )}
+          </div>
+
           {/* Invite Co-investors Section */}
           <div className="card p-4">
             <div className="flex items-center justify-between mb-4">
@@ -3353,92 +3367,6 @@ export default function StartupDetailPage() {
         </div>
       )}
 
-      {activeTab === 'events' && (
-        <>
-          {/* Score Timeline Chart */}
-          <ScoreTimelineChart data={scoreHistory || []} />
-
-          {/* Score Events List */}
-          <div className="card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Score Events</h3>
-            {(scoreEvents?.data?.length ?? 0) > 0 ? (
-            <div className="divide-y divide-gray-200">
-              {scoreEvents?.data.map((event: {
-                id: string;
-                createdAt: string;
-                signal: string;
-                impact: number;
-                category: string;
-                source: string;
-                evidence: string;
-              }) => (
-                <div key={event.id} className="p-4">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-3">
-                      <div
-                        className={clsx(
-                          'mt-1 w-8 h-8 rounded-full flex items-center justify-center',
-                          event.impact > 0 ? 'bg-success-100' : 'bg-danger-100'
-                        )}
-                      >
-                        {event.impact > 0 ? (
-                          <TrendingUp className="w-4 h-4 text-success-600" />
-                        ) : (
-                          <TrendingDown className="w-4 h-4 text-danger-600" />
-                        )}
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-900">{event.signal}</p>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="badge bg-gray-100 text-gray-600">{event.category}</span>
-                          <span className="text-sm text-gray-500">via {event.source}</span>
-                        </div>
-                        {event.evidence && (
-                          <p className="text-sm text-gray-500 mt-2 italic">"{event.evidence}"</p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <span
-                        className={clsx(
-                          'text-lg font-bold',
-                          event.impact > 0 ? 'text-success-600' : 'text-danger-600'
-                        )}
-                      >
-                        {event.impact > 0 ? '+' : ''}{event.impact}
-                      </span>
-                      <p className="text-xs text-gray-500 mt-1">
-                        {event.createdAt ? format(new Date(event.createdAt), 'MMM d, yyyy h:mm a') : 'N/A'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="p-12 text-center">
-              <Clock className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-              <p className="text-gray-600">No score events yet.</p>
-              <p className="text-sm text-gray-500 mt-1">
-                Score events track signals that affect the investment score.
-              </p>
-              <button
-                onClick={() => generateScoreEventsMutation.mutate()}
-                disabled={generateScoreEventsMutation.isPending}
-                className="btn btn-primary mt-4 inline-flex items-center gap-2"
-              >
-                {generateScoreEventsMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
-                {generateScoreEventsMutation.isPending ? 'Generating...' : 'Generate Score Events'}
-              </button>
-            </div>
-          )}
-          </div>
-        </>
-      )}
 
       {/* Document Analysis Progress Modal */}
       {analyzingDeckId && (

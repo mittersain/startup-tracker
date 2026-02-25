@@ -116,7 +116,7 @@ export const startupsApi = {
     return response.data;
   },
 
-  update: async (id: string, data: Partial<{ name: string; website: string; description: string; status: string; stage: string; notes: string; tags: string[] }>) => {
+  update: async (id: string, data: Partial<{ name: string; website: string; description: string; status: string; stage: string; notes: string; tags: string[]; gpNotes: string }>) => {
     const response = await api.patch(`/startups/${id}`, data);
     return response.data;
   },

@@ -15,6 +15,8 @@ import {
   FileText,
   Clock,
   Mail,
+  ArrowUpDown,
+  AlertCircle,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -46,10 +48,14 @@ const statusColors: Record<DealStatus, string> = {
   archived: 'bg-gray-100 text-gray-500',
 };
 
+type SortBy = 'score' | 'newest' | 'pipeline_days' | 'needs_response';
+
 export default function StartupsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [search, setSearch] = useState(searchParams.get('search') ?? '');
+  const [sortBy, setSortBy] = useState<SortBy>('score');
+  const [needsActionOnly, setNeedsActionOnly] = useState(false);
 
   const status = searchParams.get('status') as DealStatus | null;
   const stage = searchParams.get('stage') as FundingStage | null;
@@ -66,7 +72,32 @@ export default function StartupsPage() {
       }),
   });
 
-  const startups = data?.data ?? [];
+  // Client-side sort & filter
+  const allStartups: Startup[] = data?.data ?? [];
+
+  const startups = allStartups
+    .filter((s) => {
+      if (!needsActionOnly) return true;
+      return s.isAwaitingResponse || s.hasNewResponse;
+    })
+    .sort((a, b) => {
+      switch (sortBy) {
+        case 'score':
+          return (b.currentScore ?? 0) - (a.currentScore ?? 0);
+        case 'newest':
+          return new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime();
+        case 'pipeline_days':
+          // More days in pipeline = higher priority (awaiting decision longer)
+          return (b.daysSinceOutreach ?? 0) - (a.daysSinceOutreach ?? 0);
+        case 'needs_response':
+          // Awaiting response first, then by days since outreach
+          if (a.isAwaitingResponse && !b.isAwaitingResponse) return -1;
+          if (!a.isAwaitingResponse && b.isAwaitingResponse) return 1;
+          return (b.daysSinceOutreach ?? 0) - (a.daysSinceOutreach ?? 0);
+        default:
+          return 0;
+      }
+    });
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -107,49 +138,90 @@ export default function StartupsPage() {
 
       {/* Filters */}
       <div className="card p-3 sm:p-4">
-        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3 sm:gap-4">
-          {/* Search */}
-          <form onSubmit={handleSearch} className="flex-1 min-w-0 sm:min-w-[200px]">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search startups..."
-                className="input pl-10 min-h-[44px]"
-              />
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3 sm:gap-4">
+            {/* Search */}
+            <form onSubmit={handleSearch} className="flex-1 min-w-0 sm:min-w-[200px]">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search startups..."
+                  className="input pl-10 min-h-[44px]"
+                />
+              </div>
+            </form>
+
+            <div className="flex gap-2 sm:gap-4 flex-wrap">
+              {/* Status filter */}
+              <select
+                value={status ?? ''}
+                onChange={(e) => handleFilterChange('status', e.target.value || null)}
+                className="input flex-1 sm:w-auto min-h-[44px]"
+              >
+                <option value="">All statuses</option>
+                {statusOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Stage filter */}
+              <select
+                value={stage ?? ''}
+                onChange={(e) => handleFilterChange('stage', e.target.value || null)}
+                className="input flex-1 sm:w-auto min-h-[44px]"
+              >
+                <option value="">All stages</option>
+                {stageOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Sort */}
+              <div className="flex items-center gap-1.5">
+                <ArrowUpDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortBy)}
+                  className="input sm:w-auto min-h-[44px]"
+                >
+                  <option value="score">Score (high→low)</option>
+                  <option value="newest">Newest first</option>
+                  <option value="pipeline_days">Days in pipeline</option>
+                  <option value="needs_response">Needs response first</option>
+                </select>
+              </div>
             </div>
-          </form>
+          </div>
 
-          <div className="flex gap-2 sm:gap-4">
-            {/* Status filter */}
-            <select
-              value={status ?? ''}
-              onChange={(e) => handleFilterChange('status', e.target.value || null)}
-              className="input flex-1 sm:w-auto min-h-[44px]"
+          {/* Needs action quick filter */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setNeedsActionOnly(!needsActionOnly)}
+              className={clsx(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors',
+                needsActionOnly
+                  ? 'bg-amber-100 text-amber-700 border-amber-300'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+              )}
             >
-              <option value="">All statuses</option>
-              {statusOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-
-            {/* Stage filter */}
-            <select
-              value={stage ?? ''}
-              onChange={(e) => handleFilterChange('stage', e.target.value || null)}
-              className="input flex-1 sm:w-auto min-h-[44px]"
-            >
-              <option value="">All stages</option>
-              {stageOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+              <AlertCircle className="w-3.5 h-3.5" />
+              Needs action
+              {needsActionOnly && (
+                <X className="w-3 h-3 ml-0.5" />
+              )}
+            </button>
+            {needsActionOnly && (
+              <span className="text-xs text-gray-500">
+                Showing {startups.length} of {allStartups.length} startups
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -182,7 +254,8 @@ export default function StartupsPage() {
               to={`/startups/${startup.id}`}
               className={clsx(
                 "flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3",
-                startup.hasNewResponse && "bg-green-50 border-l-4 border-green-500"
+                startup.hasNewResponse && "bg-green-50 border-l-4 border-green-500",
+                startup.isAwaitingResponse && !startup.hasNewResponse && (startup.daysSinceOutreach ?? 0) > 3 && "border-l-4 border-amber-400"
               )}
             >
               <div className="flex items-center gap-3 sm:gap-4">
