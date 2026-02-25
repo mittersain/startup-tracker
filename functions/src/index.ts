@@ -202,6 +202,22 @@ Respond with ONLY the JSON object, no markdown or explanation.`;
     }
 
     const parsed = JSON.parse(jsonMatch[0]);
+
+    // Reconcile currentScore with breakdown to ensure they add up
+    if (parsed.scoreBreakdown) {
+      const b = parsed.scoreBreakdown;
+      // Clamp each category base to its max
+      if (b.team) b.team.base = Math.max(0, Math.min(25, b.team.base || 0));
+      if (b.market) b.market.base = Math.max(0, Math.min(25, b.market.base || 0));
+      if (b.product) b.product.base = Math.max(0, Math.min(20, b.product.base || 0));
+      if (b.traction) b.traction.base = Math.max(0, Math.min(20, b.traction.base || 0));
+      if (b.deal) b.deal.base = Math.max(0, Math.min(10, b.deal.base || 0));
+
+      // Recalculate currentScore from the actual breakdown bases
+      const calculatedScore = (b.team?.base || 0) + (b.market?.base || 0) + (b.product?.base || 0) + (b.traction?.base || 0) + (b.deal?.base || 0);
+      parsed.currentScore = Math.max(0, Math.min(100, Math.round(calculatedScore)));
+    }
+
     console.log(`[AI Analyze] Generated score ${parsed.currentScore} for ${startup.name}`);
     return parsed;
   } catch (error) {
@@ -5806,8 +5822,99 @@ app.post('/evaluation/:startupId/score', authenticate, async (_req, res) => {
   return res.json({ score: 50, breakdown: {} });
 });
 
-app.get('/evaluation/:startupId/score-breakdown', authenticate, async (_req, res) => {
-  return res.json({ breakdown: {}, score: 50 });
+app.get('/evaluation/:startupId/score-breakdown', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.startupId as string;
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const data = startupDoc.data()!;
+    if (data.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const breakdown = data.scoreBreakdown || {};
+    const teamBase = breakdown.team?.base || 0;
+    const marketBase = breakdown.market?.base || 0;
+    const productBase = breakdown.product?.base || 0;
+    const tractionBase = breakdown.traction?.base || 0;
+    const dealBase = breakdown.deal?.base || 0;
+    const calculatedTotal = teamBase + marketBase + productBase + tractionBase + dealBase;
+
+    return res.json({
+      startupName: data.name,
+      totalScore: data.currentScore ?? calculatedTotal,
+      isPostRevenue: false,
+      recommendation: data.currentScore >= 85 ? 'strong_invest' : data.currentScore >= 70 ? 'invest' : data.currentScore >= 55 ? 'consider' : 'pass',
+      overallCommentary: data.businessModelAnalysis?.concerns?.[0] || 'Score based on AI analysis of pitch materials.',
+      strengths: data.businessModelAnalysis?.strengths || [],
+      concerns: data.businessModelAnalysis?.concerns || [],
+      sections: [
+        {
+          name: 'Team',
+          score: teamBase + (breakdown.team?.adjusted || 0),
+          maxScore: 25,
+          weight: '25%',
+          criteria: [
+            { name: 'Experience', score: breakdown.team?.subcriteria?.experience || 0, maxScore: 10, commentary: 'Team experience and background' },
+            { name: 'Domain Expertise', score: breakdown.team?.subcriteria?.domain_expertise || 0, maxScore: 10, commentary: 'Founder-market fit and domain knowledge' },
+            { name: 'Execution Ability', score: breakdown.team?.subcriteria?.execution_ability || 0, maxScore: 5, commentary: 'Ability to execute on vision' },
+          ],
+        },
+        {
+          name: 'Market',
+          score: marketBase + (breakdown.market?.adjusted || 0),
+          maxScore: 25,
+          weight: '25%',
+          criteria: [
+            { name: 'Market Size', score: breakdown.market?.subcriteria?.size || 0, maxScore: 10, commentary: 'Total addressable market' },
+            { name: 'Growth', score: breakdown.market?.subcriteria?.growth || 0, maxScore: 10, commentary: 'Market growth trajectory' },
+            { name: 'Timing', score: breakdown.market?.subcriteria?.timing || 0, maxScore: 5, commentary: 'Why now is the right time' },
+          ],
+        },
+        {
+          name: 'Product',
+          score: productBase + (breakdown.product?.adjusted || 0),
+          maxScore: 20,
+          weight: '20%',
+          criteria: [
+            { name: 'Innovation', score: breakdown.product?.subcriteria?.innovation || 0, maxScore: 8, commentary: 'Product uniqueness and innovation' },
+            { name: 'Defensibility', score: breakdown.product?.subcriteria?.defensibility || 0, maxScore: 7, commentary: 'Competitive moat and defensibility' },
+            { name: 'Scalability', score: breakdown.product?.subcriteria?.scalability || 0, maxScore: 5, commentary: 'Product scalability potential' },
+          ],
+        },
+        {
+          name: 'Traction',
+          score: tractionBase + (breakdown.traction?.adjusted || 0),
+          maxScore: 20,
+          weight: '20%',
+          criteria: [
+            { name: 'Revenue', score: breakdown.traction?.subcriteria?.revenue || 0, maxScore: 8, commentary: 'Revenue and monetization' },
+            { name: 'Users', score: breakdown.traction?.subcriteria?.users || 0, maxScore: 7, commentary: 'User base and adoption' },
+            { name: 'Growth Rate', score: breakdown.traction?.subcriteria?.growth_rate || 0, maxScore: 5, commentary: 'Growth velocity' },
+          ],
+        },
+        {
+          name: 'Deal',
+          score: dealBase + (breakdown.deal?.adjusted || 0),
+          maxScore: 10,
+          weight: '10%',
+          criteria: [
+            { name: 'Valuation', score: breakdown.deal?.subcriteria?.valuation || 0, maxScore: 5, commentary: 'Valuation assessment' },
+            { name: 'Terms', score: breakdown.deal?.subcriteria?.terms || 0, maxScore: 5, commentary: 'Deal terms and structure' },
+          ],
+        },
+      ],
+      qaHistory: { roundsCompleted: 0, questionsAsked: 0, questionsAnswered: 0 },
+      scoredAt: data.scoreUpdatedAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error fetching score breakdown:', error);
+    return res.status(500).json({ error: 'Failed to fetch score breakdown' });
+  }
 });
 
 // ==================== DRAFT REPLY ROUTES ====================
