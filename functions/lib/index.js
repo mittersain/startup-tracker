@@ -438,13 +438,20 @@ async function recalculateStartupScore(startupId) {
         throw new Error(`Startup ${startupId} not found`);
     }
     const startupData = startupDoc.data();
-    // 2. Fetch the latest deck with AI analysis (source of base scores)
-    const decksSnapshot = await db.collection('decks')
+    // 2. Fetch all decks for this startup and find the latest processed one (avoids composite index requirement)
+    const allDecksSnapshot = await db.collection('decks')
         .where('startupId', '==', startupId)
-        .where('status', '==', 'processed')
-        .orderBy('processedAt', 'desc')
-        .limit(1)
         .get();
+    // Filter to processed decks and sort by processedAt desc in code
+    const processedDecks = allDecksSnapshot.docs
+        .filter(d => d.data().status === 'processed' && d.data().aiAnalysis)
+        .sort((a, b) => {
+        const aTime = a.data().processedAt?.toMillis?.() || 0;
+        const bTime = b.data().processedAt?.toMillis?.() || 0;
+        return bTime - aTime; // desc
+    });
+    // Create a virtual snapshot-like object with just the latest processed deck
+    const decksSnapshot = { empty: processedDecks.length === 0, docs: processedDecks.slice(0, 1) };
     // 3. Fetch all emails with score adjustments
     const emailsSnapshot = await db.collection('emails')
         .where('startupId', '==', startupId)
@@ -551,15 +558,33 @@ async function recalculateStartupScore(startupId) {
         enrichTractionAdj = enrichmentData.scoreImpact.tractionAdjustment || 0;
         console.log(`[RecalcScore] Enrichment adjustments: team=${enrichTeamAdj}, market=${enrichMarketAdj}, traction=${enrichTractionAdj}`);
     }
-    // ---- ACCUMULATE FROM SCORE EVENTS (subcollection) ----
+    // ---- ACCUMULATE FROM SCORE EVENTS ----
+    // IMPORTANT: Skip events from 'backfill' and 'deck_analysis' sources — these are informational logs
+    // that describe the initial analysis findings. The base scores already include those.
+    // Only count events from sources that represent NEW data beyond the initial analysis.
+    const INFORMATIONAL_SOURCES = new Set([
+        'backfill', // Informational events describing existing analysis
+        'deck_analysis', // Informational events from deck processing
+        'proposal_approval', // Informational events from proposal approval
+        'founder_response', // Excluded: email adjustments read directly from email docs
+        'email_reanalysis', // Excluded: email adjustments read directly from email docs
+    ]);
     let eventTeamAdj = 0;
     let eventMarketAdj = 0;
     let eventProductAdj = 0;
     let eventTractionAdj = 0;
     let eventDealAdj = 0;
     let eventRedFlags = 0;
-    scoreEventsSnapshot.forEach((eventDoc) => {
+    const processScoreEvent = (eventDoc) => {
         const event = eventDoc.data();
+        if (!event)
+            return;
+        // Skip informational/duplicate sources
+        if (INFORMATIONAL_SOURCES.has(event.source))
+            return;
+        // Skip enrichment events — enrichment adjustments are read from enrichmentData above
+        if (event.source === 'enrichment')
+            return;
         const impact = event.impact || 0;
         switch (event.category) {
             case 'team':
@@ -581,36 +606,14 @@ async function recalculateStartupScore(startupId) {
                 eventRedFlags += Math.abs(impact);
                 break;
         }
-    });
+    };
+    scoreEventsSnapshot.forEach(processScoreEvent);
     // Also check top-level scoreEvents collection
     const globalScoreEventsSnapshot = await db.collection('scoreEvents')
         .where('startupId', '==', startupId)
         .get();
-    globalScoreEventsSnapshot.forEach((eventDoc) => {
-        const event = eventDoc.data();
-        const impact = event.impact || 0;
-        switch (event.category) {
-            case 'team':
-                eventTeamAdj += impact;
-                break;
-            case 'market':
-                eventMarketAdj += impact;
-                break;
-            case 'product':
-                eventProductAdj += impact;
-                break;
-            case 'traction':
-                eventTractionAdj += impact;
-                break;
-            case 'deal':
-                eventDealAdj += impact;
-                break;
-            case 'red_flag':
-                eventRedFlags += Math.abs(impact);
-                break;
-        }
-    });
-    console.log(`[RecalcScore] Score event adjustments: team=${eventTeamAdj}, market=${eventMarketAdj}, product=${eventProductAdj}, traction=${eventTractionAdj}, deal=${eventDealAdj}, redFlags=${eventRedFlags}`);
+    globalScoreEventsSnapshot.forEach(processScoreEvent);
+    console.log(`[RecalcScore] Score event adjustments (filtered): team=${eventTeamAdj}, market=${eventMarketAdj}, product=${eventProductAdj}, traction=${eventTractionAdj}, deal=${eventDealAdj}, redFlags=${eventRedFlags}`);
     // ---- COMBINE ALL ADJUSTMENTS ----
     baseBreakdown.team.adjusted = emailTeamAdj + enrichTeamAdj + eventTeamAdj;
     baseBreakdown.market.adjusted = enrichMarketAdj + eventMarketAdj;
@@ -923,6 +926,48 @@ app.use(generalLimiter);
 // Health check
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString(), database: 'firestore', version: '2.0' });
+});
+// Admin endpoint: Recalculate ALL startup scores using unified scoring
+// This is needed after deploying the unified scoring system to fix existing mismatched scores
+app.post('/admin/recalculate-all-scores', async (req, res) => {
+    try {
+        // Simple admin key protection
+        const adminKey = req.headers['x-admin-key'];
+        if (adminKey !== 'recalc-2026') {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+        const startupsSnapshot = await db.collection('startups').get();
+        const results = [];
+        for (const doc of startupsSnapshot.docs) {
+            const data = doc.data();
+            try {
+                const { currentScore } = await recalculateStartupScore(doc.id);
+                results.push({
+                    id: doc.id,
+                    name: data.name || 'Unknown',
+                    previousScore: data.currentScore || 0,
+                    newScore: currentScore,
+                });
+                console.log(`[AdminRecalc] ${data.name}: ${data.currentScore} -> ${currentScore}`);
+            }
+            catch (err) {
+                const errMsg = err instanceof Error ? err.message : 'Unknown error';
+                console.error(`[AdminRecalc] Failed for ${data.name}:`, errMsg);
+                results.push({
+                    id: doc.id,
+                    name: data.name || 'Unknown',
+                    previousScore: data.currentScore || 0,
+                    newScore: -1,
+                    error: errMsg,
+                });
+            }
+        }
+        return res.json({ success: true, totalProcessed: results.length, results });
+    }
+    catch (error) {
+        console.error('Admin recalculate error:', error);
+        return res.status(500).json({ error: 'Failed to recalculate scores' });
+    }
 });
 // Debug middleware to log requests
 app.use((req, _res, next) => {
@@ -2694,6 +2739,68 @@ app.post('/alerts/:id/read', authenticate, async (req, res) => {
     catch (error) {
         console.error('Mark alert as read error:', error);
         return res.status(500).json({ error: 'Failed to mark alert as read' });
+    }
+});
+// Force recalculate score from all data sources (useful after unified scoring deployment)
+app.post('/startups/:id/recalculate-score', authenticate, async (req, res) => {
+    try {
+        const startupId = req.params.id;
+        const startupRef = db.collection('startups').doc(startupId);
+        const startupDoc = await startupRef.get();
+        if (!startupDoc.exists) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const data = startupDoc.data();
+        if (data.organizationId !== req.user.organizationId) {
+            return res.status(404).json({ error: 'Startup not found' });
+        }
+        const { currentScore, breakdown } = await recalculateStartupScore(startupId);
+        return res.json({
+            success: true,
+            previousScore: data.currentScore,
+            currentScore,
+            breakdown,
+        });
+    }
+    catch (error) {
+        console.error('Recalculate score error:', error);
+        return res.status(500).json({ error: 'Failed to recalculate score' });
+    }
+});
+// Recalculate scores for ALL startups in the organization
+app.post('/startups/recalculate-all-scores', authenticate, async (req, res) => {
+    try {
+        const startupsSnapshot = await db.collection('startups')
+            .where('organizationId', '==', req.user.organizationId)
+            .get();
+        const results = [];
+        for (const doc of startupsSnapshot.docs) {
+            const data = doc.data();
+            try {
+                const { currentScore } = await recalculateStartupScore(doc.id);
+                results.push({
+                    id: doc.id,
+                    name: data.name,
+                    previousScore: data.currentScore || 0,
+                    newScore: currentScore,
+                });
+            }
+            catch (err) {
+                console.error(`Failed to recalculate score for ${data.name}:`, err);
+                results.push({
+                    id: doc.id,
+                    name: data.name,
+                    previousScore: data.currentScore || 0,
+                    newScore: -1, // indicates failure
+                });
+            }
+        }
+        console.log(`[RecalcAll] Recalculated scores for ${results.length} startups`);
+        return res.json({ success: true, results });
+    }
+    catch (error) {
+        console.error('Recalculate all scores error:', error);
+        return res.status(500).json({ error: 'Failed to recalculate scores' });
     }
 });
 // Manually trigger AI analysis for a startup
