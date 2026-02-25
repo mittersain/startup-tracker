@@ -644,7 +644,7 @@ evaluationRouter.get('/:startupId/score-breakdown', async (req: Request, res: Re
           name: 'Thiel Criteria',
           score: evaluation.thielScore,
           maxScore: evaluation.isPostRevenue ? 50 : 58,
-          weight: '50%',
+          weight: evaluation.isPostRevenue ? '50%' : '58%',
           criteria: [
             { name: 'Contrarian Insight / Secret', ...evaluation.contrarianInsight as object },
             { name: '10x Product Advantage', ...evaluation.productAdvantage10x as object },
