@@ -46,6 +46,9 @@ import {
   FileDown,
   Copy,
   Share2,
+  Activity,
+  Info,
+  FileSearch,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -168,6 +171,12 @@ export default function StartupDetailPage() {
   const { data: commMetrics } = useQuery({
     queryKey: ['startup-comm-metrics', id],
     queryFn: () => emailsApi.getMetrics(id!),
+    enabled: !!id,
+  });
+
+  const { data: analysisHistory } = useQuery({
+    queryKey: ['startup-analysis-history', id],
+    queryFn: () => startupsApi.getAnalysisHistory(id!),
     enabled: !!id,
   });
 
@@ -1033,6 +1042,157 @@ export default function StartupDetailPage() {
 
       {activeTab === 'analysis' && (
         <div className="space-y-6">
+
+          {/* ===== PERSISTENT ANALYSIS HEADER ===== */}
+          <div className="card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Brain className="w-5 h-5 text-primary-600" />
+                <h3 className="font-semibold text-gray-900">Persistent Analysis</h3>
+              </div>
+              <div className="flex items-center gap-3">
+                {analysisHistory?.lastUpdated && (
+                  <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Last updated: {(() => {
+                      try { return format(new Date(analysisHistory.lastUpdated), 'MMM d, yyyy h:mm a'); }
+                      catch { return 'N/A'; }
+                    })()}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Data Sources Summary */}
+            {analysisHistory?.dataSources && (
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <div className="flex items-center justify-center gap-1.5 mb-1">
+                    <FileSearch className="w-4 h-4 text-blue-600" />
+                    <span className="text-lg font-bold text-blue-700">{analysisHistory.dataSources.decks}</span>
+                  </div>
+                  <p className="text-xs text-blue-600 font-medium">Decks Analyzed</p>
+                </div>
+                <div className="bg-purple-50 rounded-lg p-3 text-center">
+                  <div className="flex items-center justify-center gap-1.5 mb-1">
+                    <Mail className="w-4 h-4 text-purple-600" />
+                    <span className="text-lg font-bold text-purple-700">{analysisHistory.dataSources.emails}</span>
+                  </div>
+                  <p className="text-xs text-purple-600 font-medium">Emails Analyzed</p>
+                </div>
+                <div className="bg-emerald-50 rounded-lg p-3 text-center">
+                  <div className="flex items-center justify-center gap-1.5 mb-1">
+                    <Globe className="w-4 h-4 text-emerald-600" />
+                    <span className="text-lg font-bold text-emerald-700">{analysisHistory.dataSources.enrichment}</span>
+                  </div>
+                  <p className="text-xs text-emerald-600 font-medium">Research Sources</p>
+                </div>
+              </div>
+            )}
+
+            {/* AI Summary */}
+            {analysisHistory?.aiSummary ? (
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Sparkles className="w-4 h-4 text-primary-500" />
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Consolidated AI Summary</p>
+                </div>
+                <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto">
+                  {analysisHistory.aiSummary}
+                </pre>
+              </div>
+            ) : (
+              <div className="bg-gray-50 rounded-lg p-4 text-center">
+                <Info className="w-5 h-5 text-gray-400 mx-auto mb-2" />
+                <p className="text-sm text-gray-500">No consolidated analysis yet. Run AI analysis or add documents to build the persistent analysis.</p>
+              </div>
+            )}
+          </div>
+
+          {/* ===== ANALYSIS TIMELINE ===== */}
+          <div className="card p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Activity className="w-5 h-5 text-primary-600" />
+              <h3 className="font-semibold text-gray-900">Analysis Timeline</h3>
+              <span className="text-xs text-gray-400 ml-auto">
+                {analysisHistory?.timeline?.length || 0} events
+              </span>
+            </div>
+
+            {analysisHistory?.timeline && analysisHistory.timeline.length > 0 ? (
+              <div className="relative">
+                {/* Vertical timeline line */}
+                <div className="absolute left-4 top-2 bottom-2 w-0.5 bg-gray-200" />
+
+                <div className="space-y-0">
+                  {analysisHistory.timeline.map((event: {
+                    date: string;
+                    type: string;
+                    title: string;
+                    details: string;
+                    source: string;
+                    scoreAfter?: number;
+                  }, i: number) => {
+                    const iconMap: Record<string, { icon: typeof Brain; color: string; bg: string }> = {
+                      created: { icon: CheckCircle, color: 'text-gray-500', bg: 'bg-gray-100' },
+                      deck_analysis: { icon: FileText, color: 'text-blue-600', bg: 'bg-blue-100' },
+                      email_received: { icon: ArrowDownLeft, color: 'text-purple-600', bg: 'bg-purple-100' },
+                      email_sent: { icon: ArrowUpRight, color: 'text-indigo-600', bg: 'bg-indigo-100' },
+                      enrichment: { icon: Globe, color: 'text-emerald-600', bg: 'bg-emerald-100' },
+                      score_update: { icon: Activity, color: 'text-orange-600', bg: 'bg-orange-100' },
+                    };
+                    const config = iconMap[event.type] || { icon: Brain, color: 'text-gray-500', bg: 'bg-gray-100' };
+                    const IconComponent = config.icon;
+
+                    return (
+                      <div key={i} className="relative flex gap-4 py-3">
+                        {/* Timeline dot */}
+                        <div className={clsx('relative z-10 flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center', config.bg)}>
+                          <IconComponent className={clsx('w-4 h-4', config.color)} />
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 min-w-0 pb-3 border-b border-gray-100 last:border-0">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{event.title}</p>
+                              <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{event.details}</p>
+                            </div>
+                            <div className="flex-shrink-0 text-right">
+                              {event.scoreAfter !== undefined && event.scoreAfter !== null && (
+                                <span className="inline-block px-2 py-0.5 text-xs font-bold rounded-full bg-primary-100 text-primary-700 mb-1">
+                                  {event.scoreAfter}/100
+                                </span>
+                              )}
+                              <p className="text-xs text-gray-400 whitespace-nowrap">
+                                {(() => {
+                                  try { return format(new Date(event.date), 'MMM d, yyyy'); }
+                                  catch { return 'N/A'; }
+                                })()}
+                              </p>
+                              <p className="text-xs text-gray-400">
+                                {(() => {
+                                  try { return format(new Date(event.date), 'h:mm a'); }
+                                  catch { return ''; }
+                                })()}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <Clock className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+                <p className="text-sm text-gray-500">No analysis events yet.</p>
+              </div>
+            )}
+          </div>
+
+          {/* ===== BUSINESS MODEL ANALYSIS ===== */}
           {businessAnalysis ? (
             <>
               {/* Business Model Overview */}
@@ -1156,7 +1316,7 @@ export default function StartupDetailPage() {
                 </div>
               )}
             </>
-          ) : (
+          ) : !analysisHistory?.aiSummary && (
             <div className="card p-12 text-center">
               <Brain className="w-12 h-12 mx-auto text-gray-400 mb-4" />
               <p className="text-gray-600">No business model analysis available.</p>

@@ -140,6 +140,11 @@ export const startupsApi = {
     return response.data;
   },
 
+  getAnalysisHistory: async (id: string) => {
+    const response = await api.get(`/startups/${id}/analysis-history`);
+    return response.data;
+  },
+
   addScoreEvent: async (id: string, data: { category: string; signal: string; impact: number; evidence?: string }) => {
     const response = await api.post(`/startups/${id}/score-events`, data);
     return response.data;

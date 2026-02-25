@@ -5912,6 +5912,153 @@ app.get('/startups/:id/score-history', authenticate, async (req: AuthRequest, re
   }
 });
 
+// Get analysis history timeline — shows what was analyzed and when
+app.get('/startups/:id/analysis-history', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const startupId = req.params.id as string;
+    const startupDoc = await db.collection('startups').doc(startupId).get();
+
+    if (!startupDoc.exists) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const startupData = startupDoc.data()!;
+    if (startupData.organizationId !== req.user!.organizationId) {
+      return res.status(404).json({ error: 'Startup not found' });
+    }
+
+    const toISOString = (val: unknown): string | null => {
+      if (!val) return null;
+      if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+        return (val as { toDate: () => Date }).toDate().toISOString();
+      }
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'string') return val;
+      return null;
+    };
+
+    const timeline: Array<{
+      date: string;
+      type: string;
+      title: string;
+      details: string;
+      source: string;
+      scoreAfter?: number;
+    }> = [];
+
+    // 1. Initial proposal/creation
+    if (startupData.createdAt) {
+      timeline.push({
+        date: toISOString(startupData.createdAt) || new Date().toISOString(),
+        type: 'created',
+        title: 'Startup added to pipeline',
+        details: `${startupData.name} was added via ${startupData.founderEmail ? 'email proposal' : 'manual entry'}`,
+        source: 'system',
+      });
+    }
+
+    // 2. Deck analyses
+    const decksSnapshot = await db.collection('decks')
+      .where('startupId', '==', startupId)
+      .get();
+
+    decksSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.aiAnalysis && data.processedAt) {
+        timeline.push({
+          date: toISOString(data.processedAt) || toISOString(data.createdAt) || new Date().toISOString(),
+          type: 'deck_analysis',
+          title: `Pitch deck analyzed: ${data.fileName || 'Document'}`,
+          details: data.aiAnalysis.summary || `Score: ${data.aiAnalysis.score}/100`,
+          source: 'deck',
+          scoreAfter: data.aiAnalysis.score,
+        });
+      }
+    });
+
+    // 3. Email analyses
+    const emailsSnapshot = await db.collection('emails')
+      .where('startupId', '==', startupId)
+      .get();
+
+    emailsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.aiAnalysis) {
+        timeline.push({
+          date: toISOString(data.date) || toISOString(data.createdAt) || new Date().toISOString(),
+          type: data.direction === 'inbound' ? 'email_received' : 'email_sent',
+          title: data.direction === 'inbound'
+            ? `Founder response analyzed: ${data.subject || 'Email'}`
+            : `Outbound email analyzed: ${data.subject || 'Email'}`,
+          details: data.aiAnalysis.recommendation
+            ? `Recommendation: ${data.aiAnalysis.recommendation}${data.aiAnalysis.responseQuality?.score ? ` (Quality: ${data.aiAnalysis.responseQuality.score}/10)` : ''}`
+            : `Email from ${data.from || 'founder'} analyzed`,
+          source: 'email',
+        });
+      }
+    });
+
+    // 4. Enrichment
+    if (startupData.enrichmentData?.enrichmentStatus === 'completed') {
+      const enrichDate = toISOString(startupData.enrichmentData.completedAt) ||
+                         toISOString(startupData.enrichmentData.startedAt) ||
+                         toISOString(startupData.updatedAt);
+      timeline.push({
+        date: enrichDate || new Date().toISOString(),
+        type: 'enrichment',
+        title: 'Research & enrichment completed',
+        details: [
+          startupData.enrichmentData.websiteData ? 'Website analyzed' : null,
+          startupData.enrichmentData.crunchbaseData ? 'Crunchbase data found' : null,
+          startupData.enrichmentData.linkedInData ? 'LinkedIn data found' : null,
+          startupData.enrichmentData.scoreImpact?.signals?.length
+            ? `${startupData.enrichmentData.scoreImpact.signals.length} signals detected`
+            : null,
+        ].filter(Boolean).join(', ') || 'External data sources analyzed',
+        source: 'research',
+      });
+    }
+
+    // 5. Score recalculations
+    if (startupData.scoreUpdatedAt) {
+      timeline.push({
+        date: toISOString(startupData.scoreUpdatedAt) || new Date().toISOString(),
+        type: 'score_update',
+        title: 'Score recalculated',
+        details: `Current score: ${startupData.currentScore}/100 (Base: ${startupData.baseScore || 'N/A'})`,
+        source: 'system',
+        scoreAfter: startupData.currentScore,
+      });
+    }
+
+    // Sort timeline by date descending (most recent first)
+    timeline.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    // Build the last updated info
+    const lastUpdated = toISOString(startupData.scoreUpdatedAt) ||
+                        toISOString(startupData.updatedAt) ||
+                        null;
+
+    return res.json({
+      startupName: startupData.name,
+      currentScore: startupData.currentScore,
+      baseScore: startupData.baseScore,
+      lastUpdated,
+      aiSummary: startupData.aiSummary?.summary || null,
+      aiSummaryUpdatedAt: toISOString(startupData.aiSummary?.lastUpdated) || null,
+      dataSources: {
+        decks: decksSnapshot.docs.filter(d => d.data().aiAnalysis).length,
+        emails: emailsSnapshot.docs.filter(d => d.data().aiAnalysis).length,
+        enrichment: startupData.enrichmentData?.enrichmentStatus === 'completed' ? 1 : 0,
+      },
+      timeline,
+    });
+  } catch (error) {
+    console.error('Get analysis history error:', error);
+    return res.status(500).json({ error: 'Failed to get analysis history' });
+  }
+});
+
 app.post('/startups/:id/score-events', authenticate, async (req: AuthRequest, res) => {
   try {
     const startupId = req.params.id as string;
