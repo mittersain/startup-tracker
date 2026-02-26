@@ -927,6 +927,30 @@ app.use(generalLimiter);
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString(), database: 'firestore', version: '2.0' });
 });
+// Admin endpoint: Reset password for a user
+app.post('/admin/reset-password', async (req, res) => {
+    try {
+        const adminKey = req.headers['x-admin-key'];
+        if (adminKey !== 'recalc-2026') {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+        const { email, newPassword } = req.body;
+        if (!email || !newPassword) {
+            return res.status(400).json({ error: 'Email and newPassword required' });
+        }
+        const usersSnapshot = await db.collection('users').where('email', '==', email).get();
+        if (usersSnapshot.empty) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await usersSnapshot.docs[0].ref.update({ password: hashedPassword });
+        return res.json({ success: true, message: `Password reset for ${email}` });
+    }
+    catch (error) {
+        console.error('Reset password error:', error);
+        return res.status(500).json({ error: 'Failed to reset password' });
+    }
+});
 // Admin endpoint: Recalculate ALL startup scores using unified scoring
 // This is needed after deploying the unified scoring system to fix existing mismatched scores
 app.post('/admin/recalculate-all-scores', async (req, res) => {
