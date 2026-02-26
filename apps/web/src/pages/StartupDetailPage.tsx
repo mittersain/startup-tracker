@@ -855,35 +855,41 @@ export default function StartupDetailPage() {
                 })}
               </div>
 
-              {/* Additional signals — only show comm/momentum if non-default (not 5.0 baseline) */}
-              {((breakdown.communication ?? 5) !== 5 || (breakdown.momentum ?? 5) !== 5 || (breakdown.redFlags ?? 0) !== 0) && (
-                <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-200">
-                  {(breakdown.communication ?? 5) !== 5 && (
+              {/* Additional signals — always show comm+momentum so breakdown math matches total */}
+              <div className="flex items-center gap-4 mt-4 pt-4 border-t border-gray-200">
+                {(() => {
+                  const comm = breakdown.communication ?? 5;
+                  const isDefault = comm === 5;
+                  return (
                     <div className="flex items-center gap-1 text-sm">
-                      <Mail className="w-4 h-4 text-primary-500" />
-                      <span className={(breakdown.communication ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
-                        {(breakdown.communication ?? 0) > 0 ? '+' : ''}{(breakdown.communication ?? 0).toFixed(1)} comm
+                      <Mail className="w-4 h-4 text-gray-400" />
+                      <span className={isDefault ? 'text-gray-400' : comm > 0 ? 'text-success-600' : 'text-danger-600'}>
+                        {comm > 0 ? '+' : ''}{comm.toFixed(1)} comm{isDefault ? ' (base)' : ''}
                       </span>
                     </div>
-                  )}
-                  {(breakdown.momentum ?? 5) !== 5 && (
+                  );
+                })()}
+                {(() => {
+                  const mom = breakdown.momentum ?? 5;
+                  const isDefault = mom === 5;
+                  return (
                     <div className="flex items-center gap-1 text-sm">
-                      <TrendingUp className="w-4 h-4 text-primary-500" />
-                      <span className={(breakdown.momentum ?? 0) > 0 ? 'text-success-600' : 'text-danger-600'}>
-                        {(breakdown.momentum ?? 0) > 0 ? '+' : ''}{(breakdown.momentum ?? 0).toFixed(1)} momentum
+                      <TrendingUp className="w-4 h-4 text-gray-400" />
+                      <span className={isDefault ? 'text-gray-400' : mom > 0 ? 'text-success-600' : 'text-danger-600'}>
+                        {mom > 0 ? '+' : ''}{mom.toFixed(1)} momentum{isDefault ? ' (base)' : ''}
                       </span>
                     </div>
-                  )}
-                  {(breakdown.redFlags ?? 0) !== 0 && (
-                    <div className="flex items-center gap-1 text-sm">
-                      <AlertTriangle className="w-4 h-4 text-danger-500" />
-                      <span className="text-danger-600">
-                        {(breakdown.redFlags ?? 0).toFixed(1)} red flags
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
+                  );
+                })()}
+                {(breakdown.redFlags ?? 0) !== 0 && (
+                  <div className="flex items-center gap-1 text-sm">
+                    <AlertTriangle className="w-4 h-4 text-danger-500" />
+                    <span className="text-danger-600">
+                      {(breakdown.redFlags ?? 0).toFixed(1)} red flags
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
