@@ -169,7 +169,27 @@ Provide your analysis as a JSON object with this exact structure:
     Keep it SHORT - 3-5 sentences total. Founders are busy, you're busy.)
 }
 
-Be realistic in your scoring. Early-stage startups with limited info should score 40-60. Only exceptional startups with strong traction score above 70.
+SCORING CALIBRATION — BE CRITICAL, CONSERVATIVE, AND SKEPTICAL:
+
+Score bands:
+- 0–40: Weak or missing team, unclear product, no validation, bad deal
+- 40–55: Idea-stage or pre-revenue. Limited info. Cannot score higher without proof.
+- 55–65: Some early validation — a handful of users, pilots, or pre-revenue signals. Decent team.
+- 65–75: Clear traction signal — paying customers OR strong user growth with a credible path to revenue.
+- 75–85: Meaningful revenue (MRR/ARR mentioned with real numbers), strong growth rate, proven team.
+- 85–100: EXCEPTIONAL ONLY — top-tier team with prior exits, explosive proven growth, significant revenue, clear market leadership. Reserve this for 1-in-50 startups.
+
+HARD RULES — MISSING INFO = LOW SCORE (do not assume or extrapolate):
+- Revenue not mentioned → traction.revenue = 0–2 (NEVER above 3 without actual numbers)
+- User count not mentioned → traction.users = 0–2
+- Growth rate not mentioned → traction.growth_rate = 0–2
+- Pre-revenue or no traction data at all → traction base MAX 6/20
+- Team has no prior startup or relevant domain experience → team.experience MAX 4/10
+- Deal terms/valuation not mentioned → deal.valuation MAX 2/5, deal.terms MAX 2/5
+- A startup with no revenue AND no user metrics CANNOT score above 62.
+- A startup with unproven team AND no traction CANNOT score above 55.
+- Strong vision/narrative alone does NOT justify a high score. Execution evidence is required.
+
 Respond with ONLY the JSON object, no markdown or explanation.`;
         const result = await model.generateContent(prompt);
         const response = await result.response;
@@ -4818,6 +4838,28 @@ async function analyzeDeckWithAI(deckId, fileBuffer, fileName, startupId) {
 
 CRITICAL: The "score" field MUST equal team.base + market.base + product.base + traction.base + deal.base.
 Each category "base" MUST equal the sum of its subcriteria.
+
+SCORING CALIBRATION — BE CRITICAL, CONSERVATIVE, AND SKEPTICAL:
+
+Score bands:
+- 0–40: Weak team, no validation, no traction, poor deal
+- 40–55: Pre-revenue idea stage. No real proof points. Default for a basic deck with no numbers.
+- 55–65: Early validation — some users or pilots mentioned, reasonable team.
+- 65–75: Paying customers OR strong user growth with real metrics cited.
+- 75–85: Meaningful revenue with actual MRR/ARR numbers, proven team, strong growth data.
+- 85–100: EXCEPTIONAL — top-tier team (prior exits or pedigree), explosive proven growth, significant revenue, category leadership. Reserve for 1-in-50 decks.
+
+HARD RULES — MISSING INFO = LOW SCORE. Never extrapolate or assume:
+- Revenue not shown in deck → traction.revenue = 0–2 (max 3 if pre-revenue milestone shown)
+- No user/customer numbers → traction.users = 0–2
+- No growth rate data → traction.growth_rate = 0–2
+- Pre-revenue deck with no traction data → traction base MAX 6/20
+- Team slide missing or founders have no relevant experience → team.experience MAX 4/10
+- No valuation or deal terms in deck → deal.valuation MAX 2/5, deal.terms MAX 2/5
+- A deck with no revenue AND no user metrics CANNOT score above 62.
+- Strong design, big vision, or large TAM alone do NOT justify a high score.
+- The deck must show EVIDENCE, not just claims.
+
 Respond with ONLY the JSON object.`;
         let result;
         // If we have a PDF buffer, send it to Gemini for visual analysis
@@ -5027,11 +5069,15 @@ app.get('/startups/:id/score-events', authenticate, async (req, res) => {
         const snapshot = await db.collection('scoreEvents')
             .where('startupId', '==', startupId)
             .get();
-        const events = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || doc.data().createdAt,
-        }));
+        const events = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                ...data,
+                createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+                timestamp: data.timestamp?.toDate?.()?.toISOString() || data.timestamp,
+            };
+        });
         return res.json({ data: events, total: events.length });
     }
     catch (error) {
