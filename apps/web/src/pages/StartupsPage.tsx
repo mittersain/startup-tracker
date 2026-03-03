@@ -17,6 +17,8 @@ import {
   Mail,
   ArrowUpDown,
   AlertCircle,
+  ThumbsDown,
+  Pause,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -50,12 +52,44 @@ const statusColors: Record<DealStatus, string> = {
 
 type SortBy = 'score' | 'newest' | 'pipeline_days' | 'needs_response';
 
+const PASS_REASONS = [
+  'Too early stage',
+  'Wrong sector / not our thesis',
+  'Weak team / founders',
+  'No traction or proof points',
+  'Competitive market',
+  'Valuation or terms concern',
+  'Business model concerns',
+  'Not a fit',
+];
+
+const getNextStatus = (status: string): string => {
+  const flow: Record<string, string> = {
+    reviewing: 'due_diligence',
+    due_diligence: 'invested',
+    snoozed: 'reviewing',
+  };
+  return flow[status] ?? 'reviewing';
+};
+
+const getAdvanceLabel = (status: string): string => {
+  const labels: Record<string, string> = {
+    reviewing: 'Move to DD',
+    due_diligence: 'Mark Invested',
+    snoozed: 'Unsnooze',
+  };
+  return labels[status] ?? 'Advance';
+};
+
 export default function StartupsPage() {
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [search, setSearch] = useState(searchParams.get('search') ?? '');
   const [sortBy, setSortBy] = useState<SortBy>('score');
   const [needsActionOnly, setNeedsActionOnly] = useState(false);
+  const [passModal, setPassModal] = useState<{ id: string; name: string } | null>(null);
+  const [passReason, setPassReason] = useState(PASS_REASONS[0]);
 
   const status = searchParams.get('status') as DealStatus | null;
   const stage = searchParams.get('stage') as FundingStage | null;
@@ -98,6 +132,39 @@ export default function StartupsPage() {
           return 0;
       }
     });
+
+  const quickAdvanceMutation = useMutation({
+    mutationFn: ({ id, nextStatus }: { id: string; nextStatus: string }) =>
+      startupsApi.updateStatus(id, nextStatus),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Status updated');
+    },
+    onError: () => toast.error('Failed to update status'),
+  });
+
+  const quickSnoozeMutation = useMutation({
+    mutationFn: (id: string) => startupsApi.snooze(id, 'Follow up later', 1),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Snoozed for 1 month');
+    },
+    onError: () => toast.error('Failed to snooze'),
+  });
+
+  const quickPassMutation = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      startupsApi.pass(id, reason),
+    onSuccess: () => {
+      setPassModal(null);
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Startup passed');
+    },
+    onError: () => toast.error('Failed to pass startup'),
+  });
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -248,9 +315,11 @@ export default function StartupsPage() {
         </div>
       ) : (
         <div className="card divide-y divide-gray-200">
-          {startups.map((startup: Startup) => (
+          {startups.map((startup: Startup) => {
+            const canAdvance = ['reviewing', 'due_diligence', 'snoozed'].includes(startup.status);
+            return (
+            <div key={startup.id} className="relative group">
             <Link
-              key={startup.id}
               to={`/startups/${startup.id}`}
               className={clsx(
                 "flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3",
@@ -350,7 +419,98 @@ export default function StartupsPage() {
                 </div>
               </div>
             </Link>
-          ))}
+
+            {/* Hover triage actions (desktop only) */}
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              <div className="flex items-center gap-0.5 bg-white shadow-md rounded-lg border border-gray-200 px-1.5 py-1">
+                {canAdvance && (
+                  <button
+                    onClick={() =>
+                      quickAdvanceMutation.mutate({
+                        id: startup.id!,
+                        nextStatus: getNextStatus(startup.status),
+                      })
+                    }
+                    disabled={quickAdvanceMutation.isPending}
+                    className="px-2 py-1 text-xs font-medium text-primary-700 hover:bg-primary-50 rounded transition-colors disabled:opacity-50 whitespace-nowrap"
+                    title={getAdvanceLabel(startup.status)}
+                  >
+                    {getAdvanceLabel(startup.status)}
+                  </button>
+                )}
+                <button
+                  onClick={() => quickSnoozeMutation.mutate(startup.id!)}
+                  disabled={quickSnoozeMutation.isPending || startup.status === 'snoozed'}
+                  className="p-1 text-gray-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors disabled:opacity-50"
+                  title="Snooze 1 month"
+                >
+                  <Pause className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => {
+                    setPassModal({ id: startup.id!, name: startup.name });
+                    setPassReason(PASS_REASONS[0]);
+                  }}
+                  className="p-1 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                  title="Pass on this startup"
+                >
+                  <ThumbsDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+            </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Pass Confirmation Modal */}
+      {passModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">
+              Pass on {passModal.name}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">Select a reason for passing.</p>
+
+            <div className="space-y-1.5 mb-5 max-h-64 overflow-y-auto">
+              {PASS_REASONS.map((reason) => (
+                <label
+                  key={reason}
+                  className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer"
+                >
+                  <input
+                    type="radio"
+                    name="passReason"
+                    value={reason}
+                    checked={passReason === reason}
+                    onChange={(e) => setPassReason(e.target.value)}
+                    className="text-primary-600"
+                  />
+                  <span className="text-sm text-gray-700">{reason}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button onClick={() => setPassModal(null)} className="flex-1 btn-secondary">
+                Cancel
+              </button>
+              <button
+                onClick={() =>
+                  quickPassMutation.mutate({ id: passModal.id, reason: passReason })
+                }
+                disabled={quickPassMutation.isPending}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 font-medium text-sm flex items-center justify-center"
+              >
+                {quickPassMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  'Pass'
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -3,9 +3,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { startupsApi, inboxApi } from '@/services/api';
 import {
-  TrendingUp,
-  TrendingDown,
-  Minus,
   ArrowRight,
   Upload,
   AlertTriangle,
@@ -27,6 +24,11 @@ import {
   Filter,
   Pause,
   Target,
+  ThumbsDown,
+  ChevronRight,
+  AlertCircle,
+  BarChart2,
+  Percent,
 } from 'lucide-react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
@@ -83,6 +85,17 @@ const statusConfig: Record<string, { label: string; color: string }> = {
   archived: { label: 'Archived', color: 'bg-gray-100 text-gray-500' },
 };
 
+const PASS_REASONS = [
+  'Too early stage',
+  'Wrong sector / not our thesis',
+  'Weak team / founders',
+  'No traction or proof points',
+  'Competitive market',
+  'Valuation or terms concern',
+  'Business model concerns',
+  'Not a fit',
+];
+
 // Scanning progress steps
 const SCAN_STEPS = [
   { id: 'connect', label: 'Connecting to inbox', icon: Server, duration: 2000 },
@@ -90,6 +103,56 @@ const SCAN_STEPS = [
   { id: 'analyze', label: 'Analyzing with AI', icon: Brain, duration: 8000 },
   { id: 'filter', label: 'Filtering proposals', icon: Filter, duration: 2000 },
 ];
+
+const getNextStatus = (status: string): string => {
+  const flow: Record<string, string> = {
+    reviewing: 'due_diligence',
+    due_diligence: 'invested',
+    snoozed: 'reviewing',
+  };
+  return flow[status] ?? 'reviewing';
+};
+
+const getAdvanceLabel = (status: string): string => {
+  const labels: Record<string, string> = {
+    reviewing: 'Move to DD',
+    due_diligence: 'Mark Invested',
+    snoozed: 'Unsnooze',
+  };
+  return labels[status] ?? 'Advance';
+};
+
+const getActionInfo = (startup: Startup) => {
+  const days = startup.daysSinceOutreach ?? 0;
+  if (startup.hasNewResponse) return {
+    label: 'Founder replied',
+    description: 'Review their response now',
+    borderColor: 'border-green-400',
+    badgeColor: 'bg-green-100 text-green-700',
+    dotColor: 'bg-green-500',
+  };
+  if (startup.isAwaitingResponse && days > 7) return {
+    label: `No reply — ${days}d`,
+    description: 'Consider following up or passing',
+    borderColor: 'border-red-400',
+    badgeColor: 'bg-red-100 text-red-700',
+    dotColor: 'bg-red-500',
+  };
+  if (startup.isAwaitingResponse) return {
+    label: `Awaiting reply — ${days}d`,
+    description: 'Waiting for founder response',
+    borderColor: 'border-amber-400',
+    badgeColor: 'bg-amber-100 text-amber-700',
+    dotColor: 'bg-amber-500',
+  };
+  return {
+    label: `Stuck ${days}d in pipeline`,
+    description: 'No activity — make a decision',
+    borderColor: 'border-orange-400',
+    badgeColor: 'bg-orange-100 text-orange-700',
+    dotColor: 'bg-orange-500',
+  };
+};
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
@@ -102,15 +165,21 @@ export default function DashboardPage() {
   const [processingProposalId, setProcessingProposalId] = useState<string | null>(null);
   const [processingProposalName, setProcessingProposalName] = useState<string | null>(null);
 
+  // Pass modal state
+  const [passModal, setPassModal] = useState<{ id: string; name: string } | null>(null);
+  const [passReason, setPassReason] = useState(PASS_REASONS[0]);
+
   const { data: counts } = useQuery({
     queryKey: ['startup-counts'],
     queryFn: startupsApi.getCounts,
   });
 
-  const { data: startups } = useQuery({
-    queryKey: ['startups', { sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10, excludeStatus: 'passed' }],
-    queryFn: () => startupsApi.list({ sortBy: 'currentScore', sortOrder: 'desc', pageSize: 10, excludeStatus: 'passed' }),
+  // Fetch all active startups for action items + stats
+  const { data: allStartupsData } = useQuery({
+    queryKey: ['startups', 'all-active'],
+    queryFn: () => startupsApi.list({ pageSize: 200 }),
   });
+  const allStartups: Startup[] = allStartupsData?.data ?? [];
 
   // Fetch proposal queue
   const { data: queueData } = useQuery({
@@ -123,7 +192,6 @@ export default function DashboardPage() {
   const syncMutation = useMutation({
     mutationFn: inboxApi.syncInbox,
     onMutate: () => {
-      // Reset and start progress tracking
       setScanStep(0);
       setScanStartTime(Date.now());
       setElapsedTime(0);
@@ -188,7 +256,6 @@ export default function DashboardPage() {
     onSuccess: (data) => {
       setProcessingProposalId(null);
       setProcessingProposalName(null);
-      queryClient.invalidateQueries({ queryKey: ['proposal-queue'] });
       queryClient.invalidateQueries({ queryKey: ['startups'] });
       queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
       toast.success(`Startup approved with score ${data.score || 'N/A'}!`);
@@ -226,7 +293,71 @@ export default function DashboardPage() {
     },
   });
 
-  const recentStartups = startups?.data ?? [];
+  // Quick triage mutations
+  const quickAdvanceMutation = useMutation({
+    mutationFn: ({ id, nextStatus }: { id: string; nextStatus: string }) =>
+      startupsApi.updateStatus(id, nextStatus),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Status updated');
+    },
+    onError: () => toast.error('Failed to update status'),
+  });
+
+  const quickSnoozeMutation = useMutation({
+    mutationFn: (id: string) => startupsApi.snooze(id, 'Follow up later', 1),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Snoozed for 1 month');
+    },
+    onError: () => toast.error('Failed to snooze'),
+  });
+
+  const quickPassMutation = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      startupsApi.pass(id, reason),
+    onSuccess: () => {
+      setPassModal(null);
+      queryClient.invalidateQueries({ queryKey: ['startups'] });
+      queryClient.invalidateQueries({ queryKey: ['startup-counts'] });
+      toast.success('Startup passed');
+    },
+    onError: () => toast.error('Failed to pass startup'),
+  });
+
+  // Compute action items: startups needing attention
+  const actionItems = allStartups
+    .filter((s) => s.status !== 'passed' && s.status !== 'archived')
+    .filter((s) =>
+      s.hasNewResponse ||
+      (s.isAwaitingResponse && (s.daysSinceOutreach ?? 0) > 3) ||
+      (s.status === 'reviewing' && (s.daysSinceOutreach ?? 0) > 7)
+    )
+    .sort((a, b) => {
+      if (a.hasNewResponse && !b.hasNewResponse) return -1;
+      if (!a.hasNewResponse && b.hasNewResponse) return 1;
+      return (b.daysSinceOutreach ?? 0) - (a.daysSinceOutreach ?? 0);
+    })
+    .slice(0, 10);
+
+  // Compute quick stats
+  const activeCount = (['reviewing', 'due_diligence', 'snoozed'] as DealStatus[])
+    .reduce((sum, s) => sum + (counts?.[s] ?? 0), 0);
+  const totalTracked = activeCount + (counts?.invested ?? 0) + (counts?.passed ?? 0);
+  const passRate = totalTracked > 0
+    ? Math.round(((counts?.passed ?? 0) / totalTracked) * 100)
+    : 0;
+  const activeWithScore = allStartups.filter(
+    (s) => s.status !== 'passed' && s.status !== 'archived' && s.currentScore
+  );
+  const avgScore = activeWithScore.length > 0
+    ? Math.round(
+        activeWithScore.reduce((sum, s) => sum + (s.currentScore ?? 0), 0) /
+          activeWithScore.length
+      )
+    : null;
 
   return (
     <div className="space-y-6">
@@ -234,7 +365,7 @@ export default function DashboardPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-sm sm:text-base text-gray-600">Track your startup investment pipeline</p>
+          <p className="text-sm sm:text-base text-gray-600">Your investment decision cockpit</p>
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
           <button
@@ -256,31 +387,192 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Pipeline Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
-        {(['reviewing', 'due_diligence', 'invested', 'snoozed', 'passed'] as DealStatus[]).map((status) => {
-          const config = statusConfig[status];
-          const count = counts?.[status] ?? 0;
-
-          return (
+      {/* Zone 1: Needs Your Decision */}
+      <div className="card">
+        <div className="p-4 sm:p-5 border-b border-gray-200">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-primary-600" />
+            <h2 className="text-base sm:text-lg font-semibold text-gray-900">Needs Your Decision</h2>
+            {actionItems.length > 0 && (
+              <span className="px-2 py-0.5 bg-primary-100 text-primary-700 rounded-full text-sm font-medium">
+                {actionItems.length}
+              </span>
+            )}
             <Link
-              key={status}
-              to={`/startups?status=${status}`}
-              className="card p-3 sm:p-5 hover:shadow-md transition-shadow active:bg-gray-50"
+              to="/startups?sortBy=needs_response"
+              className="ml-auto text-sm text-primary-600 hover:text-primary-700"
             >
-              <div className="flex items-center justify-between">
-                <span className={clsx('badge text-xs', config.color)}>
-                  {config.label}
-                </span>
-                <ArrowRight className="w-4 h-4 text-gray-400 hidden sm:block" />
-              </div>
-              <p className="mt-2 sm:mt-3 text-2xl sm:text-3xl font-bold text-gray-900">{count}</p>
-              <p className="text-xs sm:text-sm text-gray-500">
-                {count === 1 ? 'startup' : 'startups'}
-              </p>
+              View all
             </Link>
-          );
-        })}
+          </div>
+        </div>
+
+        {actionItems.length === 0 ? (
+          <div className="p-8 text-center">
+            <CheckCircle className="w-10 h-10 mx-auto text-green-400 mb-3" />
+            <p className="text-gray-700 font-medium">You're all caught up!</p>
+            <p className="text-sm text-gray-400 mt-1">No startups need your attention right now.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {actionItems.map((startup) => {
+              const info = getActionInfo(startup);
+              const canAdvance = ['reviewing', 'due_diligence', 'snoozed'].includes(startup.status);
+              return (
+                <div
+                  key={startup.id}
+                  className={clsx(
+                    'flex items-center gap-3 p-3 sm:p-4 border-l-4',
+                    info.borderColor
+                  )}
+                >
+                  {/* Dot */}
+                  <div className={clsx('w-2 h-2 rounded-full flex-shrink-0', info.dotColor)} />
+
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-gray-900 truncate">{startup.name}</span>
+                      <span className={clsx('px-2 py-0.5 rounded text-xs font-medium', info.badgeColor)}>
+                        {info.label}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">{info.description}</p>
+                  </div>
+
+                  {/* Score */}
+                  <div className="hidden sm:block flex-shrink-0">
+                    <ScoreBadge score={startup.currentScore} startupId={startup.id} size="sm" />
+                  </div>
+
+                  {/* Quick actions */}
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {canAdvance && (
+                      <button
+                        onClick={() =>
+                          quickAdvanceMutation.mutate({
+                            id: startup.id!,
+                            nextStatus: getNextStatus(startup.status),
+                          })
+                        }
+                        disabled={quickAdvanceMutation.isPending}
+                        className="hidden sm:inline-flex px-2.5 py-1.5 text-xs font-medium bg-primary-50 text-primary-700 hover:bg-primary-100 rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {getAdvanceLabel(startup.status)}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => quickSnoozeMutation.mutate(startup.id!)}
+                      disabled={quickSnoozeMutation.isPending || startup.status === 'snoozed'}
+                      className="p-1.5 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
+                      title="Snooze 1 month"
+                    >
+                      <Pause className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setPassModal({ id: startup.id!, name: startup.name });
+                        setPassReason(PASS_REASONS[0]);
+                      }}
+                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      title="Pass on this startup"
+                    >
+                      <ThumbsDown className="w-4 h-4" />
+                    </button>
+                    <Link
+                      to={`/startups/${startup.id}`}
+                      className="p-1.5 text-gray-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+                      title="Open"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Zone 2 + Zone 3: Pipeline Funnel + Quick Stats */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 sm:gap-6">
+        {/* Zone 2: Pipeline Funnel (3/5 width) */}
+        <div className="lg:col-span-3 card">
+          <div className="p-4 border-b border-gray-200">
+            <h2 className="text-base font-semibold text-gray-900">Pipeline</h2>
+          </div>
+          <div className="p-4 grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {(['reviewing', 'due_diligence', 'invested', 'snoozed', 'passed'] as DealStatus[]).map(
+              (status) => {
+                const config = statusConfig[status];
+                const count = counts?.[status] ?? 0;
+                return (
+                  <Link
+                    key={status}
+                    to={`/startups?status=${status}`}
+                    className="p-3 sm:p-4 rounded-lg border border-gray-200 hover:border-primary-300 hover:shadow-sm transition-all group"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={clsx('badge text-xs', config.color)}>
+                        {config.label}
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-gray-300 group-hover:text-primary-400 transition-colors" />
+                    </div>
+                    <p className="text-2xl sm:text-3xl font-bold text-gray-900">{count}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {count === 1 ? 'startup' : 'startups'}
+                    </p>
+                  </Link>
+                );
+              }
+            )}
+          </div>
+        </div>
+
+        {/* Zone 3: Quick Stats (2/5 width) */}
+        <div className="lg:col-span-2 grid grid-cols-2 gap-3 content-start">
+          {/* Total Active */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <BarChart2 className="w-4 h-4 text-gray-400" />
+              <span className="text-xs text-gray-500 font-medium">Total Active</span>
+            </div>
+            <p className="text-3xl font-bold text-gray-900">{activeCount}</p>
+            <p className="text-xs text-gray-400 mt-0.5">in pipeline</p>
+          </div>
+
+          {/* Avg Score */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Target className="w-4 h-4 text-gray-400" />
+              <span className="text-xs text-gray-500 font-medium">Avg Score</span>
+            </div>
+            <p className="text-3xl font-bold text-gray-900">{avgScore ?? '—'}</p>
+            <p className="text-xs text-gray-400 mt-0.5">active deals</p>
+          </div>
+
+          {/* Pass Rate */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Percent className="w-4 h-4 text-gray-400" />
+              <span className="text-xs text-gray-500 font-medium">Pass Rate</span>
+            </div>
+            <p className="text-3xl font-bold text-gray-900">{passRate}%</p>
+            <p className="text-xs text-gray-400 mt-0.5">{counts?.passed ?? 0} passed</p>
+          </div>
+
+          {/* Needs Action */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className={clsx('w-4 h-4', actionItems.length > 0 ? 'text-amber-500' : 'text-gray-400')} />
+              <span className="text-xs text-gray-500 font-medium">Needs Action</span>
+            </div>
+            <p className={clsx('text-3xl font-bold', actionItems.length > 0 ? 'text-amber-600' : 'text-gray-900')}>
+              {actionItems.length}
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5">items above</p>
+          </div>
+        </div>
       </div>
 
       {/* Proposal Queue */}
@@ -314,7 +606,6 @@ export default function DashboardPage() {
                         {proposal.startupName}
                       </h3>
                       {(() => {
-                        // Normalize confidence: if <= 1, it's a decimal (0.95 = 95%), otherwise it's already a percentage
                         const confidencePercent = proposal.confidence <= 1 ? proposal.confidence * 100 : proposal.confidence;
                         return (
                           <span
@@ -365,14 +656,12 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    {/* Description */}
                     {proposal.description && (
                       <p className="text-sm text-gray-600 mb-2 line-clamp-2">
                         {proposal.description}
                       </p>
                     )}
 
-                    {/* Email source */}
                     <button
                       onClick={() => setExpandedProposal(expandedProposal === proposal.id ? null : proposal.id)}
                       className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
@@ -383,7 +672,6 @@ export default function DashboardPage() {
                       {new Date(proposal.emailDate).toLocaleDateString()}
                     </button>
 
-                    {/* Expanded email preview */}
                     {expandedProposal === proposal.id && (
                       <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm text-gray-600">
                         <p className="font-medium text-gray-700 mb-1">Email Preview:</p>
@@ -439,133 +727,61 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Recent Startups */}
-      <div className="card">
-        <div className="p-4 sm:p-5 border-b border-gray-200">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base sm:text-lg font-semibold text-gray-900">Top Scored Startups</h2>
-            <Link to="/startups" className="text-sm text-primary-600 hover:text-primary-700 active:text-primary-800 min-h-[44px] flex items-center">
-              View all
-            </Link>
-          </div>
-        </div>
+      {/* Pass Confirmation Modal */}
+      {passModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">
+              Pass on {passModal.name}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">Select a reason for passing.</p>
 
-        {recentStartups.length === 0 ? (
-          <div className="p-12 text-center">
-            <Upload className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-            <h3 className="text-lg font-medium text-gray-900 mb-2">No startups yet</h3>
-            <p className="text-gray-600 mb-4">
-              Upload a pitch deck to get started with AI-powered analysis
-            </p>
-            <Link to="/startups" className="btn-primary">
-              Add your first startup
-            </Link>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-200">
-            {recentStartups.map((startup: Startup) => (
-              <Link
-                key={startup.id}
-                to={`/startups/${startup.id}`}
-                className={clsx(
-                  "flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:p-5 hover:bg-gray-50 active:bg-gray-100 transition-colors gap-3",
-                  startup.hasNewResponse && "bg-green-50 border-l-4 border-green-500"
-                )}
+            <div className="space-y-1.5 mb-5 max-h-64 overflow-y-auto">
+              {PASS_REASONS.map((reason) => (
+                <label
+                  key={reason}
+                  className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer"
+                >
+                  <input
+                    type="radio"
+                    name="passReason"
+                    value={reason}
+                    checked={passReason === reason}
+                    onChange={(e) => setPassReason(e.target.value)}
+                    className="text-primary-600"
+                  />
+                  <span className="text-sm text-gray-700">{reason}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setPassModal(null)}
+                className="flex-1 btn-secondary"
               >
-                <div className="flex items-center gap-3 sm:gap-4">
-                  <div className={clsx(
-                    "flex items-center justify-center w-10 h-10 rounded-lg flex-shrink-0 relative",
-                    startup.hasNewResponse ? "bg-green-100" : "bg-primary-100"
-                  )}>
-                    <span className={clsx(
-                      "text-lg font-bold",
-                      startup.hasNewResponse ? "text-green-600" : "text-primary-600"
-                    )}>
-                      {startup.name.charAt(0)}
-                    </span>
-                    {startup.hasNewResponse && (
-                      <span className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full animate-pulse" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium text-gray-900 truncate">{startup.name}</p>
-                      {startup.hasNewResponse && (
-                        <span className="badge bg-green-100 text-green-700 text-xs flex items-center gap-1">
-                          <Mail className="w-3 h-3" />
-                          New response
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={clsx('badge text-xs', statusConfig[startup.status]?.color || 'bg-gray-100 text-gray-700')}>
-                        {statusConfig[startup.status]?.label || startup.status}
-                      </span>
-                      {startup.stage && (
-                        <span className="text-xs text-gray-500 capitalize">
-                          {startup.stage.replace('_', ' ')}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 sm:gap-4 pl-13 sm:pl-0" onClick={(e) => e.preventDefault()}>
-                  {/* Score with breakdown modal */}
-                  <div className="flex items-center gap-2">
-                    <ScoreBadge score={startup.currentScore} startupId={startup.id} size="lg" />
-                    {startup.scoreTrend === 'up' && (
-                      <TrendingUp className="w-4 h-4 text-success-500" />
-                    )}
-                    {startup.scoreTrend === 'down' && (
-                      <TrendingDown className="w-4 h-4 text-danger-500" />
-                    )}
-                    {startup.scoreTrend === 'stable' && startup.currentScore && (
-                      <Minus className="w-4 h-4 text-gray-400" />
-                    )}
-                  </div>
-
-                  {/* Score bar */}
-                  {startup.currentScore && (
-                    <div className="w-20 sm:w-24">
-                      <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                        <div
-                          className={clsx(
-                            'h-full rounded-full transition-all',
-                            startup.currentScore >= 70
-                              ? 'bg-success-500'
-                              : startup.currentScore >= 50
-                              ? 'bg-warning-500'
-                              : 'bg-danger-500'
-                          )}
-                          style={{ width: `${startup.currentScore}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </Link>
-            ))}
+                Cancel
+              </button>
+              <button
+                onClick={() => quickPassMutation.mutate({ id: passModal.id, reason: passReason })}
+                disabled={quickPassMutation.isPending}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 font-medium text-sm flex items-center justify-center"
+              >
+                {quickPassMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  'Pass'
+                )}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
-
-      {/* Alerts placeholder */}
-      <div className="card p-5">
-        <div className="flex items-center gap-3 mb-4">
-          <AlertTriangle className="w-5 h-5 text-warning-500" />
-          <h2 className="text-lg font-semibold text-gray-900">Recent Alerts</h2>
         </div>
-        <p className="text-gray-500">
-          Score changes and red flags will appear here when detected from email communications.
-        </p>
-      </div>
+      )}
 
-      {/* Scanning Overlay - Enhanced with progress steps */}
+      {/* Scanning Overlay */}
       {syncMutation.isPending && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-lg w-full mx-4">
-            {/* Header with timer */}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-xl font-bold text-gray-900">Scanning Your Inbox</h3>
               <div className="flex items-center gap-2 px-3 py-1 bg-gray-100 rounded-full">
@@ -576,7 +792,6 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Progress steps */}
             <div className="space-y-4 mb-6">
               {SCAN_STEPS.map((step, index) => {
                 const StepIcon = step.icon;
@@ -635,7 +850,6 @@ export default function DashboardPage() {
               })}
             </div>
 
-            {/* Status message */}
             <div className="text-center p-4 bg-gray-50 rounded-lg">
               <p className="text-sm text-gray-600">
                 {scanStep === 0 && 'Establishing secure connection to your email server...'}
@@ -656,7 +870,6 @@ export default function DashboardPage() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4">
             <div className="text-center">
-              {/* Animated icon */}
               <div className="mx-auto w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mb-4">
                 <Brain className="w-8 h-8 text-primary-600 animate-pulse" />
               </div>
@@ -669,7 +882,6 @@ export default function DashboardPage() {
                 AI is evaluating the startup and generating an investment score...
               </p>
 
-              {/* Progress indicator */}
               <div className="space-y-3 mb-6">
                 <div className="flex items-center gap-3 p-3 bg-primary-50 rounded-lg">
                   <Loader2 className="w-5 h-5 text-primary-600 animate-spin" />
@@ -685,7 +897,6 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* Loading bar */}
               <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                 <div className="h-full bg-primary-500 rounded-full animate-progress" style={{ width: '60%' }} />
               </div>
@@ -701,7 +912,6 @@ export default function DashboardPage() {
       {showResultsModal && syncResult && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
-            {/* Header */}
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
                 <h3 className="text-xl font-bold text-gray-900">Email Scan Complete</h3>
@@ -714,7 +924,6 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Stats */}
             <div className="p-6 border-b border-gray-200">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="text-center">
@@ -736,7 +945,6 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Quota Warning */}
             {syncResult.quotaExceeded && (
               <div className="px-6 py-4 bg-amber-50 border-b border-amber-200">
                 <div className="flex items-center gap-3">
@@ -760,7 +968,6 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* Results List */}
             <div className="flex-1 overflow-y-auto p-6">
               {syncResult.results.length === 0 ? (
                 <div className="text-center py-8">
@@ -830,7 +1037,6 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* Footer */}
             <div className="p-6 border-t border-gray-200 bg-gray-50 rounded-b-xl">
               <div className="flex items-center justify-between">
                 <p className="text-sm text-gray-500">
